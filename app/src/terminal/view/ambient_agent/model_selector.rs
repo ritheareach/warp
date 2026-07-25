@@ -21,6 +21,7 @@ use crate::ai::cloud_agent_settings::CloudAgentSettings;
 use crate::ai::custom_model_routers::is_custom_router_id;
 use crate::ai::execution_profiles::model_menu_items::is_auto;
 use crate::ai::harness_availability::{HarnessAvailabilityEvent, HarnessAvailabilityModel};
+use crate::ai::harness_display;
 use crate::ai::harness_display::icon_for as harness_icon_for;
 use crate::ai::llms::{LLMId, LLMPreferences, LLMPreferencesEvent};
 use crate::editor::{
@@ -74,6 +75,9 @@ pub enum ModelSelectorAction {
         model_id: String,
         reasoning_level: Option<String>,
     },
+    /// Select a CLI agent harness directly from the model picker.
+    /// This switches the active harness and uses its default model.
+    SelectCliAgentAsModel(Harness),
 }
 
 pub enum ModelSelectorEvent {
@@ -415,7 +419,9 @@ impl ModelSelector {
                                 .map(|info| info.display_name.clone())
                         })
                 })
-                .unwrap_or_else(|| "default".to_string()),
+                .unwrap_or_else(|| {
+                    harness_display::display_name(harness).to_string()
+                }),
             _ => LLMPreferences::as_ref(ctx)
                 .get_active_base_model(ctx, Some(self.terminal_view_id))
                 .display_name
@@ -502,7 +508,7 @@ impl ModelSelector {
             }
         }
 
-        let items: Vec<MenuItem<ModelSelectorAction>> = auto_choices
+        let mut items: Vec<MenuItem<ModelSelectorAction>> = auto_choices
             .into_iter()
             .chain(other_choices)
             .map(|llm| {
@@ -523,6 +529,34 @@ impl ModelSelector {
                 MenuItem::Item(fields)
             })
             .collect();
+
+        // Append locally-installed CLI agent harnesses as selectable "models".
+        let cli_agent_harnesses = [
+            (Harness::Claude, "Claude Code", harness_icon_for(Harness::Claude)),
+            (Harness::Codex, "Codex", harness_icon_for(Harness::Codex)),
+            (Harness::OpenCode, "OpenCode", harness_icon_for(Harness::OpenCode)),
+            (Harness::Antigravity, "Antigravity", harness_icon_for(Harness::Antigravity)),
+        ];
+
+        let mut cli_items: Vec<MenuItem<ModelSelectorAction>> = Vec::new();
+        for (harness, label, icon) in cli_agent_harnesses {
+            if !query.is_empty() && !label.to_lowercase().contains(query) {
+                continue;
+            }
+            let fields = MenuItemFields::new(label)
+                .with_icon(icon)
+                .with_icon_size_override(ITEM_ICON_SIZE)
+                .with_font_size_override(ITEM_FONT_SIZE)
+                .with_padding_override(ITEM_VERTICAL_PADDING, MENU_HORIZONTAL_PADDING)
+                .with_override_hover_background_color(hover_background)
+                .with_on_select_action(ModelSelectorAction::SelectCliAgentAsModel(harness));
+            cli_items.push(MenuItem::Item(fields));
+        }
+
+        if !cli_items.is_empty() {
+            items.push(MenuItem::Separator);
+            items.extend(cli_items);
+        }
 
         (items, ModelSelectorAction::SelectModel(active_llm_id))
     }
@@ -690,6 +724,21 @@ impl TypedActionView for ModelSelector {
                         ctx,
                     );
                 });
+                self.set_menu_visibility(false, ctx);
+                self.refresh_button(ctx);
+                self.refresh_menu(ctx);
+            }
+            ModelSelectorAction::SelectCliAgentAsModel(harness) => {
+                // Switch to the selected CLI agent harness with its default model.
+                if let Some(ambient_agent_model) = self.ambient_agent_model.clone() {
+                    ambient_agent_model.update(ctx, |model, ctx| {
+                        model.set_harness(*harness, ctx);
+                    });
+                    // Persist the harness selection.
+                    CloudAgentSettings::handle(ctx).update(ctx, |settings, ctx| {
+                        settings.persist_harness_selection(*harness, ctx);
+                    });
+                }
                 self.set_menu_visibility(false, ctx);
                 self.refresh_button(ctx);
                 self.refresh_menu(ctx);

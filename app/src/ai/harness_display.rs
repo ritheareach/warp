@@ -22,6 +22,7 @@ pub fn display_name(harness: Harness) -> &'static str {
         Harness::OpenCode => "OpenCode",
         Harness::Gemini => "Gemini CLI",
         Harness::Codex => "Codex",
+        Harness::Antigravity => "Antigravity",
         Harness::Unknown => "Unknown",
     }
 }
@@ -34,6 +35,7 @@ pub fn icon_for(harness: Harness) -> Icon {
         Harness::OpenCode => Icon::OpenCodeLogo,
         Harness::Gemini => Icon::GeminiLogo,
         Harness::Codex => Icon::OpenAILogo,
+        Harness::Antigravity => Icon::AntigravityLogo,
         Harness::Unknown => Icon::HelpCircle,
     }
 }
@@ -47,6 +49,7 @@ pub fn brand_color(harness: Harness) -> Option<ColorU> {
         Harness::OpenCode => None,
         Harness::Gemini => Some(GEMINI_BLUE),
         Harness::Codex => Some(OPENAI_COLOR),
+        Harness::Antigravity => None,
         Harness::Unknown => None,
     }
 }
@@ -60,6 +63,7 @@ pub fn circle_background(harness: Harness, theme: &WarpTheme) -> WarpThemeFill {
         Harness::Codex => WarpThemeFill::Solid(OPENAI_COLOR),
         Harness::Gemini => WarpThemeFill::Solid(GEMINI_BLUE),
         Harness::OpenCode => WarpThemeFill::Solid(OPENCODE_COLOR),
+        Harness::Antigravity => internal_colors::fg_overlay_2(theme),
         Harness::Unknown => internal_colors::fg_overlay_2(theme),
     }
 }
@@ -71,6 +75,7 @@ pub fn icon_fill_on_circle(harness: Harness, theme: &WarpTheme) -> WarpThemeFill
         Harness::Claude | Harness::Codex | Harness::Gemini | Harness::OpenCode => {
             WarpThemeFill::Solid(ColorU::white())
         }
+        Harness::Antigravity => theme.main_text_color(internal_colors::fg_overlay_2(theme)),
         Harness::Unknown => theme.main_text_color(internal_colors::fg_overlay_2(theme)),
     }
 }

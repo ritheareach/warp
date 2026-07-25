@@ -11,6 +11,7 @@ fn harness_config_name_round_trips_for_known_variants() {
         Harness::OpenCode,
         Harness::Gemini,
         Harness::Codex,
+        Harness::Antigravity,
     ] {
         assert_eq!(
             Harness::from_config_name(harness.config_name()),

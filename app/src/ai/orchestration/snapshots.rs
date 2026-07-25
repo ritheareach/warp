@@ -183,6 +183,7 @@ fn build_harness_snapshot(
             Harness::OpenCode,
             Harness::Gemini,
             Harness::Codex,
+            Harness::Antigravity,
         ]
         .into_iter()
         .find(|candidate| harness_display::display_name(*candidate) == display_name)

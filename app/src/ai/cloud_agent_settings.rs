@@ -132,4 +132,15 @@ impl CloudAgentSettings {
         }
         report_if_error!(self.last_selected_harness_model.set_value(map, ctx));
     }
+
+    /// Persists the selected harness so it's restored on next session.
+    pub fn persist_harness_selection(
+        &mut self,
+        harness: Harness,
+        ctx: &mut warpui::ModelContext<Self>,
+    ) {
+        report_if_error!(self
+            .last_selected_harness
+            .set_value(Some(harness.config_name().to_string()), ctx));
+    }
 }

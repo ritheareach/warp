@@ -195,7 +195,7 @@ pub fn prepare_remote_child_launch(
                 claude_auth_secret_name: None,
                 codex_auth_secret_name: Some(name),
             }),
-            Harness::Oz | Harness::OpenCode | Harness::Gemini | Harness::Unknown => None,
+            Harness::Oz | Harness::OpenCode | Harness::Gemini | Harness::Antigravity | Harness::Unknown => None,
         });
     let spawn_request = SpawnAgentRequest {
         prompt: Some(request.prompt.clone()),
