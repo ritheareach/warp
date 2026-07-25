@@ -610,6 +610,10 @@ impl ModelsByFeature {
 }
 
 /// Returns the `LLMInfo` for the built-in opencode model.
+/// This model is only usable via a custom inference endpoint — it is not
+/// registered on the Warp server, so it must NOT be injected into the server's
+/// model lists. Instead it is surfaced as an always-available custom-endpoint
+/// choice via [`LLMPreferences::builtin_custom_llms`].
 fn opencode_model_info() -> LLMInfo {
     LLMInfo {
         display_name: "OpenCode (deepseek-v4-flash)".to_owned(),
@@ -628,13 +632,6 @@ fn opencode_model_info() -> LLMInfo {
         host_configs: HashMap::new(),
         discount_percentage: None,
         context_window: LLMContextWindow::default(),
-    }
-}
-
-/// Ensures a model is present in the choices list, adding it if missing.
-fn inject_model_into_available(available: &mut AvailableLLMs, model: LLMInfo) {
-    if !available.choices.iter().any(|c| c.id == model.id) {
-        available.choices.push(model);
     }
 }
 
@@ -667,87 +664,74 @@ fn default_computer_use_llms() -> AvailableLLMs {
 
 impl Default for ModelsByFeature {
     fn default() -> Self {
-        let opencode = opencode_model_info();
-        let mut agent_mode = AvailableLLMs {
-            default_id: "auto".to_owned().into(),
-            choices: vec![LLMInfo {
-                display_name: "auto (cost-efficient)".to_owned(),
-                base_model_name: "auto (cost-efficient)".to_owned(),
-                id: "auto".to_owned().into(),
-                reasoning_level: None,
-                usage_metadata: LLMUsageMetadata {
-                    request_multiplier: 1,
-                    credit_multiplier: None,
-                },
-                description: None,
-                disable_reason: None,
-                vision_supported: true,
-                spec: None,
-                provider: LLMProvider::Unknown,
-                host_configs: HashMap::new(),
-                discount_percentage: None,
-                context_window: LLMContextWindow::default(),
-            }],
-            preferred_codex_model_id: None,
-        };
-        inject_model_into_available(&mut agent_mode, opencode.clone());
-
-        let mut coding = AvailableLLMs {
-            default_id: "auto".to_owned().into(),
-            choices: vec![LLMInfo {
-                display_name: "auto (responsive)".to_owned(),
-                base_model_name: "auto (responsive)".to_owned(),
-                id: "auto".to_owned().into(),
-                reasoning_level: None,
-                usage_metadata: LLMUsageMetadata {
-                    request_multiplier: 1,
-                    credit_multiplier: None,
-                },
-                description: None,
-                disable_reason: None,
-                vision_supported: true,
-                spec: None,
-                provider: LLMProvider::Unknown,
-                host_configs: HashMap::new(),
-                discount_percentage: None,
-                context_window: LLMContextWindow::default(),
-            }],
-            preferred_codex_model_id: None,
-        };
-        inject_model_into_available(&mut coding, opencode.clone());
-
-        let mut cli_agent = AvailableLLMs {
-            default_id: "cli-agent-auto".to_owned().into(),
-            choices: vec![LLMInfo {
-                display_name: "auto".to_owned(),
-                base_model_name: "auto".to_owned(),
-                id: "cli-agent-auto".to_owned().into(),
-                reasoning_level: None,
-                usage_metadata: LLMUsageMetadata {
-                    request_multiplier: 1,
-                    credit_multiplier: None,
-                },
-                description: None,
-                disable_reason: None,
-                vision_supported: false,
-                spec: None,
-                provider: LLMProvider::Unknown,
-                host_configs: HashMap::new(),
-                discount_percentage: None,
-                context_window: LLMContextWindow::default(),
-            }],
-            preferred_codex_model_id: None,
-        };
-        inject_model_into_available(&mut cli_agent, opencode.clone());
-
-        let mut computer_use = default_computer_use_llms();
-        inject_model_into_available(&mut computer_use, opencode);
-
         Self {
-            agent_mode,
-            coding,
-            cli_agent: Some(cli_agent),
-            computer_use: Some(computer_use),
+            agent_mode: AvailableLLMs {
+                default_id: "auto".to_owned().into(),
+                choices: vec![LLMInfo {
+                    display_name: "auto (cost-efficient)".to_owned(),
+                    base_model_name: "auto (cost-efficient)".to_owned(),
+                    id: "auto".to_owned().into(),
+                    reasoning_level: None,
+                    usage_metadata: LLMUsageMetadata {
+                        request_multiplier: 1,
+                        credit_multiplier: None,
+                    },
+                    description: None,
+                    disable_reason: None,
+                    vision_supported: true,
+                    spec: None,
+                    provider: LLMProvider::Unknown,
+                    host_configs: HashMap::new(),
+                    discount_percentage: None,
+                    context_window: LLMContextWindow::default(),
+                }],
+                preferred_codex_model_id: None,
+            },
+            coding: AvailableLLMs {
+                default_id: "auto".to_owned().into(),
+                choices: vec![LLMInfo {
+                    display_name: "auto (responsive)".to_owned(),
+                    base_model_name: "auto (responsive)".to_owned(),
+                    id: "auto".to_owned().into(),
+                    reasoning_level: None,
+                    usage_metadata: LLMUsageMetadata {
+                        request_multiplier: 1,
+                        credit_multiplier: None,
+                    },
+                    description: None,
+                    disable_reason: None,
+                    vision_supported: true,
+                    spec: None,
+                    provider: LLMProvider::Unknown,
+                    host_configs: HashMap::new(),
+                    discount_percentage: None,
+                    context_window: LLMContextWindow::default(),
+                }],
+                preferred_codex_model_id: None,
+            },
+            cli_agent: Some(AvailableLLMs {
+                default_id: "cli-agent-auto".to_owned().into(),
+                choices: vec![LLMInfo {
+                    display_name: "auto".to_owned(),
+                    base_model_name: "auto".to_owned(),
+                    id: "cli-agent-auto".to_owned().into(),
+                    reasoning_level: None,
+                    usage_metadata: LLMUsageMetadata {
+                        request_multiplier: 1,
+                        credit_multiplier: None,
+                    },
+                    description: None,
+                    disable_reason: None,
+                    vision_supported: false,
+                    spec: None,
+                    provider: LLMProvider::Unknown,
+                    host_configs: HashMap::new(),
+                    discount_percentage: None,
+                    context_window: LLMContextWindow::default(),
+                }],
+                preferred_codex_model_id: None,
+            }),
+            computer_use: Some(default_computer_use_llms()),
         }
     }
 }
@@ -839,7 +823,8 @@ impl LLMPreferences {
         }
 
         let base_llm_for_terminal_view = HashMap::new();
-        let custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(ctx).keys());
+        let mut custom_llms = Self::builtin_custom_llms();
+        custom_llms.extend(build_custom_llm_infos(ApiKeyManager::as_ref(ctx).keys()));
 
         let mut me = Self {
             models_by_feature,
@@ -1117,9 +1102,15 @@ impl LLMPreferences {
     }
 
     /// Resolves an `LLMId` against the user's custom-endpoint LLMs.
-    /// Returns `None` if the id isn't a known custom model `config_key`.
+    /// Always checks builtin models regardless of custom inference settings.
     pub fn custom_llm_info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
-        self.custom_llms.iter().find(|info| info.id == *id)
+        let builtin_count = Self::builtin_custom_llms().len();
+        // Always search builtin models
+        if let Some(info) = self.custom_llms[..builtin_count].iter().find(|info| info.id == *id) {
+            return Some(info);
+        }
+        // Search user-configured models only when custom inference is enabled
+        self.custom_llms[builtin_count..].iter().find(|info| info.id == *id)
     }
 
     /// Returns `true` when `id` identifies a model that can run in a Warp cloud
@@ -1165,19 +1156,31 @@ impl LLMPreferences {
     }
 
     fn custom_llm_info_for_id_if_enabled(&self, id: &LLMId, app: &AppContext) -> Option<&LLMInfo> {
+        // Always check builtin models regardless of custom inference settings
+        if let Some(info) = Self::builtin_custom_llms().iter().find(|info| info.id == *id) {
+            return Some(info);
+        }
         Self::custom_inference_enabled(app)
             .then(|| self.custom_llm_info_for_id(id))
             .flatten()
     }
 
+    /// Returns always-available built-in custom endpoint models that don't
+    /// require the user to have configured a custom inference endpoint.
+    /// These models appear in the model picker regardless of workspace settings.
+    fn builtin_custom_llms() -> Vec<LLMInfo> {
+        vec![opencode_model_info()]
+    }
+
     /// Iterator over the user's custom-endpoint LLMs, gated on the feature flag and entitlement.
+    /// Always includes builtin models regardless of custom inference settings.
     pub fn custom_llm_choices(&self, app: &AppContext) -> std::slice::Iter<'_, LLMInfo> {
+        let builtin_count = Self::builtin_custom_llms().len();
         if Self::custom_inference_enabled(app) {
             self.custom_llms.iter()
         } else {
-            // Empty slice with a matching element type so the return type stays consistent
-            // across both branches.
-            (&[] as &[LLMInfo]).iter()
+            // Return only the builtin models when custom inference is not enabled.
+            self.custom_llms[..builtin_count].iter()
         }
     }
 
@@ -1366,7 +1369,9 @@ impl LLMPreferences {
     /// with synthetic `LLMInfo`s. Called on every `ApiKeyManagerEvent::KeysUpdated`, so adds,
     /// edits, and removals all propagate immediately.
     fn rebuild_custom_llms(&mut self, app: &AppContext) {
-        self.custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(app).keys());
+        let mut llms = Self::builtin_custom_llms();
+        llms.extend(build_custom_llm_infos(ApiKeyManager::as_ref(app).keys()));
+        self.custom_llms = llms;
     }
 
     fn sanitize_disabled_custom_model_preferences(&mut self, ctx: &mut ModelContext<Self>) {
@@ -1742,19 +1747,8 @@ impl LLMPreferences {
         }
     }
 
-    fn on_server_update(&mut self, mut update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
+    fn on_server_update(&mut self, update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
         let has_existing_persisted_config = get_cached_models(ctx).is_some();
-
-        // Ensure the built-in opencode model is always present
-        let opencode = opencode_model_info();
-        inject_model_into_available(&mut update.agent_mode, opencode.clone());
-        inject_model_into_available(&mut update.coding, opencode.clone());
-        if let Some(ref mut cli) = update.cli_agent {
-            inject_model_into_available(cli, opencode.clone());
-        }
-        if let Some(ref mut comp) = update.computer_use {
-            inject_model_into_available(comp, opencode);
-        }
 
         let old = std::mem::replace(&mut self.models_by_feature, update);
 
