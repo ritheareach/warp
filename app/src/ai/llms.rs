@@ -609,6 +609,35 @@ impl ModelsByFeature {
     }
 }
 
+/// Returns the `LLMInfo` for the built-in opencode model.
+fn opencode_model_info() -> LLMInfo {
+    LLMInfo {
+        display_name: "OpenCode (deepseek-v4-flash)".to_owned(),
+        base_model_name: "opencode-go/deepseek-v4-flash".to_owned(),
+        id: "opencode-go/deepseek-v4-flash".to_owned().into(),
+        reasoning_level: None,
+        usage_metadata: LLMUsageMetadata {
+            request_multiplier: 1,
+            credit_multiplier: None,
+        },
+        description: Some("Open-source coding agent powered by deepseek-v4-flash".to_owned()),
+        disable_reason: None,
+        vision_supported: true,
+        spec: None,
+        provider: LLMProvider::Unknown,
+        host_configs: HashMap::new(),
+        discount_percentage: None,
+        context_window: LLMContextWindow::default(),
+    }
+}
+
+/// Ensures a model is present in the choices list, adding it if missing.
+fn inject_model_into_available(available: &mut AvailableLLMs, model: LLMInfo) {
+    if !available.choices.iter().any(|c| c.id == model.id) {
+        available.choices.push(model);
+    }
+}
+
 /// Returns the default AvailableLLMs for computer use.
 /// Used both in `ModelsByFeature::default()` and as a fallback in `get_computer_use_available()`.
 fn default_computer_use_llms() -> AvailableLLMs {
@@ -638,74 +667,87 @@ fn default_computer_use_llms() -> AvailableLLMs {
 
 impl Default for ModelsByFeature {
     fn default() -> Self {
+        let opencode = opencode_model_info();
+        let mut agent_mode = AvailableLLMs {
+            default_id: "auto".to_owned().into(),
+            choices: vec![LLMInfo {
+                display_name: "auto (cost-efficient)".to_owned(),
+                base_model_name: "auto (cost-efficient)".to_owned(),
+                id: "auto".to_owned().into(),
+                reasoning_level: None,
+                usage_metadata: LLMUsageMetadata {
+                    request_multiplier: 1,
+                    credit_multiplier: None,
+                },
+                description: None,
+                disable_reason: None,
+                vision_supported: true,
+                spec: None,
+                provider: LLMProvider::Unknown,
+                host_configs: HashMap::new(),
+                discount_percentage: None,
+                context_window: LLMContextWindow::default(),
+            }],
+            preferred_codex_model_id: None,
+        };
+        inject_model_into_available(&mut agent_mode, opencode.clone());
+
+        let mut coding = AvailableLLMs {
+            default_id: "auto".to_owned().into(),
+            choices: vec![LLMInfo {
+                display_name: "auto (responsive)".to_owned(),
+                base_model_name: "auto (responsive)".to_owned(),
+                id: "auto".to_owned().into(),
+                reasoning_level: None,
+                usage_metadata: LLMUsageMetadata {
+                    request_multiplier: 1,
+                    credit_multiplier: None,
+                },
+                description: None,
+                disable_reason: None,
+                vision_supported: true,
+                spec: None,
+                provider: LLMProvider::Unknown,
+                host_configs: HashMap::new(),
+                discount_percentage: None,
+                context_window: LLMContextWindow::default(),
+            }],
+            preferred_codex_model_id: None,
+        };
+        inject_model_into_available(&mut coding, opencode.clone());
+
+        let mut cli_agent = AvailableLLMs {
+            default_id: "cli-agent-auto".to_owned().into(),
+            choices: vec![LLMInfo {
+                display_name: "auto".to_owned(),
+                base_model_name: "auto".to_owned(),
+                id: "cli-agent-auto".to_owned().into(),
+                reasoning_level: None,
+                usage_metadata: LLMUsageMetadata {
+                    request_multiplier: 1,
+                    credit_multiplier: None,
+                },
+                description: None,
+                disable_reason: None,
+                vision_supported: false,
+                spec: None,
+                provider: LLMProvider::Unknown,
+                host_configs: HashMap::new(),
+                discount_percentage: None,
+                context_window: LLMContextWindow::default(),
+            }],
+            preferred_codex_model_id: None,
+        };
+        inject_model_into_available(&mut cli_agent, opencode.clone());
+
+        let mut computer_use = default_computer_use_llms();
+        inject_model_into_available(&mut computer_use, opencode);
+
         Self {
-            agent_mode: AvailableLLMs {
-                default_id: "auto".to_owned().into(),
-                choices: vec![LLMInfo {
-                    display_name: "auto (cost-efficient)".to_owned(),
-                    base_model_name: "auto (cost-efficient)".to_owned(),
-                    id: "auto".to_owned().into(),
-                    reasoning_level: None,
-                    usage_metadata: LLMUsageMetadata {
-                        request_multiplier: 1,
-                        credit_multiplier: None,
-                    },
-                    description: None,
-                    disable_reason: None,
-                    vision_supported: true,
-                    spec: None,
-                    provider: LLMProvider::Unknown,
-                    host_configs: HashMap::new(),
-                    discount_percentage: None,
-                    context_window: LLMContextWindow::default(),
-                }],
-                preferred_codex_model_id: None,
-            },
-            coding: AvailableLLMs {
-                default_id: "auto".to_owned().into(),
-                choices: vec![LLMInfo {
-                    display_name: "auto (responsive)".to_owned(),
-                    base_model_name: "auto (responsive)".to_owned(),
-                    id: "auto".to_owned().into(),
-                    reasoning_level: None,
-                    usage_metadata: LLMUsageMetadata {
-                        request_multiplier: 1,
-                        credit_multiplier: None,
-                    },
-                    description: None,
-                    disable_reason: None,
-                    vision_supported: true,
-                    spec: None,
-                    provider: LLMProvider::Unknown,
-                    host_configs: HashMap::new(),
-                    discount_percentage: None,
-                    context_window: LLMContextWindow::default(),
-                }],
-                preferred_codex_model_id: None,
-            },
-            cli_agent: Some(AvailableLLMs {
-                default_id: "cli-agent-auto".to_owned().into(),
-                choices: vec![LLMInfo {
-                    display_name: "auto".to_owned(),
-                    base_model_name: "auto".to_owned(),
-                    id: "cli-agent-auto".to_owned().into(),
-                    reasoning_level: None,
-                    usage_metadata: LLMUsageMetadata {
-                        request_multiplier: 1,
-                        credit_multiplier: None,
-                    },
-                    description: None,
-                    disable_reason: None,
-                    vision_supported: false,
-                    spec: None,
-                    provider: LLMProvider::Unknown,
-                    host_configs: HashMap::new(),
-                    discount_percentage: None,
-                    context_window: LLMContextWindow::default(),
-                }],
-                preferred_codex_model_id: None,
-            }),
-            computer_use: Some(default_computer_use_llms()),
+            agent_mode,
+            coding,
+            cli_agent: Some(cli_agent),
+            computer_use: Some(computer_use),
         }
     }
 }
@@ -1700,8 +1742,19 @@ impl LLMPreferences {
         }
     }
 
-    fn on_server_update(&mut self, update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
+    fn on_server_update(&mut self, mut update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
         let has_existing_persisted_config = get_cached_models(ctx).is_some();
+
+        // Ensure the built-in opencode model is always present
+        let opencode = opencode_model_info();
+        inject_model_into_available(&mut update.agent_mode, opencode.clone());
+        inject_model_into_available(&mut update.coding, opencode.clone());
+        if let Some(ref mut cli) = update.cli_agent {
+            inject_model_into_available(cli, opencode.clone());
+        }
+        if let Some(ref mut comp) = update.computer_use {
+            inject_model_into_available(comp, opencode);
+        }
 
         let old = std::mem::replace(&mut self.models_by_feature, update);
 
