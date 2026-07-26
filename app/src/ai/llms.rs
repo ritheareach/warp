@@ -609,32 +609,6 @@ impl ModelsByFeature {
     }
 }
 
-/// Returns the `LLMInfo` for the built-in opencode model.
-/// This model is only usable via a custom inference endpoint — it is not
-/// registered on the Warp server, so it must NOT be injected into the server's
-/// model lists. Instead it is surfaced as an always-available custom-endpoint
-/// choice via [`LLMPreferences::builtin_custom_llms`].
-fn opencode_model_info() -> LLMInfo {
-    LLMInfo {
-        display_name: "OpenCode (deepseek-v4-flash)".to_owned(),
-        base_model_name: "opencode-go/deepseek-v4-flash".to_owned(),
-        id: "opencode-go/deepseek-v4-flash".to_owned().into(),
-        reasoning_level: None,
-        usage_metadata: LLMUsageMetadata {
-            request_multiplier: 1,
-            credit_multiplier: None,
-        },
-        description: Some("Open-source coding agent powered by deepseek-v4-flash".to_owned()),
-        disable_reason: None,
-        vision_supported: true,
-        spec: None,
-        provider: LLMProvider::Unknown,
-        host_configs: HashMap::new(),
-        discount_percentage: None,
-        context_window: LLMContextWindow::default(),
-    }
-}
-
 /// Returns the default AvailableLLMs for computer use.
 /// Used both in `ModelsByFeature::default()` and as a fallback in `get_computer_use_available()`.
 fn default_computer_use_llms() -> AvailableLLMs {
@@ -960,19 +934,33 @@ impl LLMPreferences {
     }
 
     /// Returns the set of LLMs available for Agent Mode use.
+    /// Only shows custom endpoints and user-provided BYO key models —
+    /// Warp subscription models are hidden since this fork doesn't use Warp's servers.
     pub fn get_base_llm_choices_for_agent_mode(
         &self,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
-        // Don't show admin-disabled models in the dropdown
         let routers_enabled = FeatureFlag::CustomModelRouters.is_enabled();
+        // Collect provider keys to avoid borrowing app inside the iterator chain.
+        let has_openai = is_using_first_party_key_for_provider(&LLMProvider::OpenAI, app);
+        let has_anthropic = is_using_first_party_key_for_provider(&LLMProvider::Anthropic, app);
+        let has_google = is_using_first_party_key_for_provider(&LLMProvider::Google, app);
+        let has_xai = is_using_first_party_key_for_provider(&LLMProvider::Xai, app);
         self.models_by_feature
             .agent_mode
             .choices
             .iter()
-            .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)))
-            // Gate cloud/team routers behind the same flag as local routers so
-            // the entire custom-router feature is controlled by one flag.
+            .filter(move |llm| {
+                // Hide Warp subscription models — only show BYO-key models.
+                let has_key = match llm.provider {
+                    LLMProvider::OpenAI => has_openai,
+                    LLMProvider::Anthropic => has_anthropic,
+                    LLMProvider::Google => has_google,
+                    LLMProvider::Xai => has_xai,
+                    LLMProvider::Unknown => false,
+                };
+                has_key && !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled))
+            })
             .filter(move |llm| {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
             })
@@ -985,14 +973,25 @@ impl LLMPreferences {
         &self,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
-        // Don't show admin-disabled models in the dropdown
         let routers_enabled = FeatureFlag::CustomModelRouters.is_enabled();
+        let has_openai = is_using_first_party_key_for_provider(&LLMProvider::OpenAI, app);
+        let has_anthropic = is_using_first_party_key_for_provider(&LLMProvider::Anthropic, app);
+        let has_google = is_using_first_party_key_for_provider(&LLMProvider::Google, app);
+        let has_xai = is_using_first_party_key_for_provider(&LLMProvider::Xai, app);
         self.models_by_feature
             .coding
             .choices
             .iter()
-            .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)))
-            // Gate cloud/team routers behind the same flag as local routers.
+            .filter(move |llm| {
+                let has_key = match llm.provider {
+                    LLMProvider::OpenAI => has_openai,
+                    LLMProvider::Anthropic => has_anthropic,
+                    LLMProvider::Google => has_google,
+                    LLMProvider::Xai => has_xai,
+                    LLMProvider::Unknown => false,
+                };
+                has_key && !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled))
+            })
             .filter(move |llm| {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
             })
@@ -1005,11 +1004,23 @@ impl LLMPreferences {
         &self,
         app: &AppContext,
     ) -> impl Iterator<Item = &LLMInfo> + use<'_> {
-        // Don't show admin-disabled models in the dropdown
+        let has_openai = is_using_first_party_key_for_provider(&LLMProvider::OpenAI, app);
+        let has_anthropic = is_using_first_party_key_for_provider(&LLMProvider::Anthropic, app);
+        let has_google = is_using_first_party_key_for_provider(&LLMProvider::Google, app);
+        let has_xai = is_using_first_party_key_for_provider(&LLMProvider::Xai, app);
         self.get_cli_agent_available()
             .choices
             .iter()
-            .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)))
+            .filter(move |llm| {
+                let has_key = match llm.provider {
+                    LLMProvider::OpenAI => has_openai,
+                    LLMProvider::Anthropic => has_anthropic,
+                    LLMProvider::Google => has_google,
+                    LLMProvider::Xai => has_xai,
+                    LLMProvider::Unknown => false,
+                };
+                has_key && !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled))
+            })
             .chain(self.custom_llm_choices(app))
     }
 
@@ -1106,11 +1117,16 @@ impl LLMPreferences {
     pub fn custom_llm_info_for_id(&self, id: &LLMId) -> Option<&LLMInfo> {
         let builtin_count = Self::builtin_custom_llms().len();
         // Always search builtin models
-        if let Some(info) = self.custom_llms[..builtin_count].iter().find(|info| info.id == *id) {
+        if let Some(info) = self.custom_llms[..builtin_count]
+            .iter()
+            .find(|info| info.id == *id)
+        {
             return Some(info);
         }
         // Search user-configured models only when custom inference is enabled
-        self.custom_llms[builtin_count..].iter().find(|info| info.id == *id)
+        self.custom_llms[builtin_count..]
+            .iter()
+            .find(|info| info.id == *id)
     }
 
     /// Returns `true` when `id` identifies a model that can run in a Warp cloud
@@ -1157,7 +1173,11 @@ impl LLMPreferences {
 
     fn custom_llm_info_for_id_if_enabled(&self, id: &LLMId, app: &AppContext) -> Option<&LLMInfo> {
         // Always check builtin models regardless of custom inference settings
-        if let Some(info) = Self::builtin_custom_llms().iter().find(|info| info.id == *id) {
+        let builtin_count = Self::builtin_custom_llms().len();
+        if let Some(info) = self.custom_llms[..builtin_count]
+            .iter()
+            .find(|info| info.id == *id)
+        {
             return Some(info);
         }
         Self::custom_inference_enabled(app)
@@ -1167,9 +1187,8 @@ impl LLMPreferences {
 
     /// Returns always-available built-in custom endpoint models that don't
     /// require the user to have configured a custom inference endpoint.
-    /// These models appear in the model picker regardless of workspace settings.
     fn builtin_custom_llms() -> Vec<LLMInfo> {
-        vec![opencode_model_info()]
+        vec![]
     }
 
     /// Iterator over the user's custom-endpoint LLMs, gated on the feature flag and entitlement.

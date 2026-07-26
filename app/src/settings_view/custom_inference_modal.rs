@@ -1,6 +1,7 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-use ::ai::api_keys::{CustomEndpoint, CustomEndpointSchema};
+use ::ai::api_keys::{
+    CustomEndpoint, CustomEndpointSchema, EndpointKind, classify_endpoint_kind, detect_provider,
+    fetch_models_from_endpoint, schema_for_provider,
+};
 use url::Url;
 use warp_editor::editor::NavigationKey;
 use warpui::elements::{
@@ -57,6 +58,8 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         schema: CustomEndpointSchema,
+        endpoint_kind: EndpointKind,
+        provider_type: String,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     SaveEndpoint {
@@ -65,6 +68,8 @@ pub enum CustomEndpointModalEvent {
         url: String,
         api_key: String,
         schema: CustomEndpointSchema,
+        endpoint_kind: EndpointKind,
+        provider_type: String,
         models: Vec<(String, Option<String>, Option<String>)>,
     },
     RemoveEndpoint {
@@ -80,6 +85,8 @@ pub enum CustomEndpointModalAction {
     RemoveModel(usize),
     RemoveEndpoint,
     SetSchema(CustomEndpointSchema),
+    SetEndpointKind(EndpointKind),
+    FetchModels,
 }
 
 struct ModelRow {
@@ -95,10 +102,17 @@ pub struct CustomEndpointModal {
     api_key_editor: ViewHandle<EditorView>,
     schema_dropdown: ViewHandle<Dropdown<CustomEndpointModalAction>>,
     schema: CustomEndpointSchema,
+    endpoint_kind_dropdown: ViewHandle<Dropdown<CustomEndpointModalAction>>,
+    endpoint_kind: EndpointKind,
+    /// Auto-detected provider type (e.g. "ollama", "anthropic", "groq").
+    detected_provider: String,
     model_rows: Vec<ModelRow>,
     cancel_button_mouse_state: MouseStateHandle,
     save_button_mouse_state: MouseStateHandle,
     add_model_button_mouse_state: MouseStateHandle,
+    fetch_models_button_mouse_state: MouseStateHandle,
+    /// Whether a model fetch is in progress.
+    fetching_models: bool,
     remove_endpoint_button: ViewHandle<ActionButton>,
     editing_index: Option<usize>,
     url_has_error: bool,
@@ -269,16 +283,53 @@ impl CustomEndpointModal {
                 })
         });
 
+        let endpoint_kind = endpoint
+            .map(|ep| ep.endpoint_kind)
+            .unwrap_or(EndpointKind::Auto);
+        let detected_provider = endpoint
+            .map(|ep| ep.provider_type.clone())
+            .unwrap_or_default();
+
+        let endpoint_kind_dropdown = ctx.add_typed_action_view(|ctx| {
+            let mut dropdown = Dropdown::new(ctx);
+            dropdown.set_render_popup_externally(true, ctx);
+            dropdown.set_match_menu_width_to_top_bar(true, ctx);
+            dropdown.set_items(
+                EndpointKind::all()
+                    .iter()
+                    .map(|kind| {
+                        DropdownItem::new(
+                            kind.display_name(),
+                            CustomEndpointModalAction::SetEndpointKind(*kind),
+                        )
+                    })
+                    .collect(),
+                ctx,
+            );
+            dropdown
+        });
+        ctx.subscribe_to_view(&endpoint_kind_dropdown, |_, _, event, ctx| match event {
+            DropdownEvent::ToggleExpanded | DropdownEvent::Close => ctx.notify(),
+        });
+        endpoint_kind_dropdown.update(ctx, |dropdown, ctx| {
+            dropdown.set_selected_by_name(endpoint_kind.display_name(), ctx);
+        });
+
         Self {
             endpoint_name_editor,
             endpoint_url_editor,
             api_key_editor,
             schema_dropdown,
             schema,
+            endpoint_kind_dropdown,
+            endpoint_kind,
+            detected_provider,
             model_rows,
             cancel_button_mouse_state: Default::default(),
             save_button_mouse_state: Default::default(),
             add_model_button_mouse_state: Default::default(),
+            fetch_models_button_mouse_state: Default::default(),
+            fetching_models: false,
             remove_endpoint_button,
             editing_index,
             url_has_error,
@@ -466,6 +517,9 @@ impl CustomEndpointModal {
         let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
         let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
         let schema = self.selected_schema(ctx);
+        let endpoint_kind = self.selected_endpoint_kind(ctx);
+        // Re-detect provider from URL at save time so it's always fresh.
+        let provider_type = detect_provider(url.trim()).to_string();
         let models: Vec<(String, Option<String>, Option<String>)> = self
             .model_rows
             .iter()
@@ -488,6 +542,8 @@ impl CustomEndpointModal {
                 url,
                 api_key,
                 schema,
+                endpoint_kind,
+                provider_type,
                 models,
             });
         } else {
@@ -496,6 +552,8 @@ impl CustomEndpointModal {
                 url,
                 api_key,
                 schema,
+                endpoint_kind,
+                provider_type,
                 models,
             });
         }
@@ -513,6 +571,59 @@ impl CustomEndpointModal {
             Some(CustomEndpointModalAction::SetSchema(schema)) => schema,
             _ => self.schema,
         }
+    }
+
+    fn selected_endpoint_kind(&self, ctx: &AppContext) -> EndpointKind {
+        match self.endpoint_kind_dropdown.as_ref(ctx).selected_action() {
+            Some(CustomEndpointModalAction::SetEndpointKind(kind)) => kind,
+            _ => self.endpoint_kind,
+        }
+    }
+
+    /// Fetch available models from the configured endpoint and populate the
+    /// model rows. Runs async and updates the UI when complete.
+    fn fetch_models(&mut self, ctx: &mut ViewContext<Self>) {
+        let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
+        let api_key = self.api_key_editor.as_ref(ctx).buffer_text(ctx);
+        if url.trim().is_empty() {
+            return;
+        }
+        self.fetching_models = true;
+        ctx.notify();
+
+        ctx.spawn(
+            async move { fetch_models_from_endpoint(url.trim(), api_key.trim()).await },
+            |me, model_ids, ctx| {
+                me.fetching_models = false;
+                if model_ids.is_empty() {
+                    ctx.notify();
+                    return;
+                }
+                let font_family = Appearance::as_ref(ctx).ui_font_family();
+                let text_colors = crate::settings_view::editor_text_colors(Appearance::as_ref(ctx));
+                me.model_rows.clear();
+                for id in model_ids {
+                    let row = Self::create_model_row(
+                        Some(&id),
+                        None,
+                        None,
+                        font_family,
+                        &text_colors,
+                        ctx,
+                    );
+                    let name_editor = row.name_editor.clone();
+                    ctx.subscribe_to_view(&name_editor, |me, editor, event, ctx| {
+                        me.handle_model_editor_event(&editor, event, ctx);
+                    });
+                    let alias_editor = row.alias_editor.clone();
+                    ctx.subscribe_to_view(&alias_editor, |me, editor, event, ctx| {
+                        me.handle_model_editor_event(&editor, event, ctx);
+                    });
+                    me.model_rows.push(row);
+                }
+                ctx.notify();
+            },
+        );
     }
 
     fn cancel(&mut self, ctx: &mut ViewContext<Self>) {
@@ -657,6 +768,23 @@ impl CustomEndpointModal {
                 if !self.validate_url_field(ctx) {
                     ctx.notify();
                 }
+                // Auto-detect provider and suggest schema from the URL.
+                let url = self.endpoint_url_editor.as_ref(ctx).buffer_text(ctx);
+                let provider = detect_provider(url.trim()).to_string();
+                if provider != self.detected_provider {
+                    self.detected_provider = provider.clone();
+                    let suggested_schema = schema_for_provider(&provider);
+                    self.schema = suggested_schema;
+                    self.schema_dropdown.update(ctx, |dropdown, ctx| {
+                        dropdown.set_selected_by_name(suggested_schema.display_name(), ctx);
+                    });
+                    let suggested_kind = classify_endpoint_kind(url.trim());
+                    self.endpoint_kind = suggested_kind;
+                    self.endpoint_kind_dropdown.update(ctx, |dropdown, ctx| {
+                        dropdown.set_selected_by_name(suggested_kind.display_name(), ctx);
+                    });
+                    ctx.notify();
+                }
             }
             _ => {}
         }
@@ -784,6 +912,38 @@ impl View for CustomEndpointModal {
                 .with_margin_bottom(16.)
                 .finish(),
         );
+
+        // Endpoint kind
+        column.add_child(
+            Container::new(label("Endpoint kind"))
+                .with_margin_bottom(4.)
+                .finish(),
+        );
+        column.add_child(
+            Container::new(ChildView::new(&self.endpoint_kind_dropdown).finish())
+                .with_margin_bottom(8.)
+                .finish(),
+        );
+
+        // Auto-detected provider label
+        if !self.detected_provider.is_empty() && self.detected_provider != "openai" {
+            let provider_text = format!("Detected: {}", self.detected_provider);
+            column.add_child(
+                Container::new(
+                    Text::new(provider_text, appearance.ui_font_family(), LABEL_FONT_SIZE)
+                        .with_color(theme.nonactive_ui_text_color().into())
+                        .finish(),
+                )
+                .with_margin_bottom(16.)
+                .finish(),
+            );
+        } else {
+            column.add_child(
+                Container::new(Empty::new().finish())
+                    .with_margin_bottom(8.)
+                    .finish(),
+            );
+        }
 
         // Endpoint name
         column.add_child(
@@ -977,8 +1137,41 @@ impl View for CustomEndpointModal {
             })
             .finish();
 
+        let fetch_label = if self.fetching_models {
+            "Fetching…"
+        } else {
+            "Fetch models"
+        };
+        let mut fetch_button = appearance
+            .ui_builder()
+            .button(
+                ButtonVariant::Secondary,
+                self.fetch_models_button_mouse_state.clone(),
+            )
+            .with_text_label(fetch_label.to_string())
+            .with_style(UiComponentStyles {
+                font_size: Some(14.),
+                padding: Some(Coords::uniform(6.).left(8.).right(8.)),
+                ..Default::default()
+            });
+        if self.fetching_models {
+            fetch_button = fetch_button.disabled();
+        }
+        let fetch_button = fetch_button
+            .build()
+            .on_click(move |ctx, _, _| {
+                ctx.dispatch_typed_action(CustomEndpointModalAction::FetchModels);
+            })
+            .finish();
+
+        let model_buttons_row = Flex::row()
+            .with_spacing(8.)
+            .with_child(add_model_button)
+            .with_child(fetch_button)
+            .finish();
+
         column.add_child(
-            Container::new(add_model_button)
+            Container::new(model_buttons_row)
                 .with_margin_bottom(24.)
                 .finish(),
         );
@@ -1063,6 +1256,10 @@ impl View for CustomEndpointModal {
         // Render the schema dropdown popup at the outermost Stack level so it
         // paints after all form content and appears on top of sibling fields.
         let schema_popup = self.schema_dropdown.as_ref(app).render_menu_as_overlay();
+        let endpoint_kind_popup = self
+            .endpoint_kind_dropdown
+            .as_ref(app)
+            .render_menu_as_overlay();
         let mut outer_stack = Stack::new();
         outer_stack.add_child(
             Flex::column()
@@ -1074,6 +1271,9 @@ impl View for CustomEndpointModal {
         if let Some((popup, positioning)) = schema_popup {
             outer_stack.add_positioned_overlay_child(popup, positioning);
         }
+        if let Some((popup, positioning)) = endpoint_kind_popup {
+            outer_stack.add_positioned_overlay_child(popup, positioning);
+        }
         outer_stack.finish()
     }
 }
@@ -1083,66 +1283,45 @@ fn validate_url(url: &str) -> Result<(), &'static str> {
         return Ok(());
     }
     let parsed = Url::parse(url).map_err(|_| "Invalid URL")?;
-    if parsed.scheme() != "https" {
-        return Err("URL must use HTTPS");
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return Err("URL must use HTTP or HTTPS");
     }
     let Some(host) = parsed.host_str().filter(|h| !h.is_empty()) else {
         return Err("URL must include a host");
     };
-    if is_restricted_host(host) {
-        return Err("URL must not use a local or private host");
+    // Only restrict non-local hosts from using HTTP without HTTPS.
+    if parsed.scheme() != "https" && !is_local_host_str(host) {
+        return Err("Remote URLs must use HTTPS");
     }
     Ok(())
 }
 
+fn is_local_host_str(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+        || host.starts_with("192.168.")
+        || host.starts_with("10.")
+        || host.starts_with("172.")
+}
+
 fn is_endpoint_form_valid(name: &str, url: &str, api_key: &str, has_models: bool) -> bool {
-    !name.trim().is_empty()
-        && !url.trim().is_empty()
-        && !api_key.trim().is_empty()
-        && has_models
-        && validate_url(url).is_ok()
-}
-
-fn is_restricted_host(host: &str) -> bool {
-    let host = host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host);
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
+    if name.trim().is_empty() || url.trim().is_empty() || !has_models {
+        return false;
     }
-    host.parse::<IpAddr>().is_ok_and(is_restricted_ip)
-}
-
-fn is_restricted_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_restricted_ipv4(ip),
-        IpAddr::V6(ip) => is_restricted_ipv6(ip),
+    if validate_url(url).is_err() {
+        return false;
     }
-}
-
-fn is_restricted_ipv4(ip: Ipv4Addr) -> bool {
-    ip.is_loopback() || ip.is_unspecified() || ip.is_private() || ip.is_link_local()
-}
-
-fn is_restricted_ipv6(ip: Ipv6Addr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() || is_ipv6_unique_local(ip) || is_ipv6_link_local(ip)
-    {
-        return true;
+    // API key is optional for local endpoints (Ollama, llama.cpp, etc.)
+    let parsed = Url::parse(url).ok();
+    let is_local = parsed
+        .as_ref()
+        .and_then(|u| u.host_str())
+        .is_some_and(is_local_host_str);
+    if !is_local && api_key.trim().is_empty() {
+        return false;
     }
-    if let Some(ipv4) = ip.to_ipv4_mapped() {
-        return is_restricted_ipv4(ipv4);
-    }
-    false
+    true
 }
 
-fn is_ipv6_unique_local(ip: Ipv6Addr) -> bool {
-    ip.segments()[0] & 0xfe00 == 0xfc00
-}
-
-fn is_ipv6_link_local(ip: Ipv6Addr) -> bool {
-    ip.segments()[0] & 0xffc0 == 0xfe80
-}
 impl TypedActionView for CustomEndpointModal {
     type Action = CustomEndpointModalAction;
 
@@ -1160,6 +1339,13 @@ impl TypedActionView for CustomEndpointModal {
             CustomEndpointModalAction::SetSchema(schema) => {
                 self.schema = *schema;
                 ctx.notify();
+            }
+            CustomEndpointModalAction::SetEndpointKind(kind) => {
+                self.endpoint_kind = *kind;
+                ctx.notify();
+            }
+            CustomEndpointModalAction::FetchModels => {
+                self.fetch_models(ctx);
             }
         }
     }

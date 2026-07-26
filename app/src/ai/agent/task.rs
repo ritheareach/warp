@@ -774,6 +774,14 @@ impl Task {
             .enumerate()
             .find(|(_, m)| message.id == m.id)
         else {
+            log::warn!(
+                "append_to_message_content: MessageNotFound — looking for message.id={:?}, task has {} messages with ids: {:?}",
+                message.id,
+                self.try_get_source().map(|s| s.messages.len()).unwrap_or(0),
+                self.try_get_source()
+                    .map(|s| s.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            );
             report_error!("Message not found for append client action.");
             return Err(UpdateTaskError::MessageNotFound);
         };

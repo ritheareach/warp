@@ -74,6 +74,7 @@ base64.workspace = true
 http_client.workspace = true
 languages.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 serde_urlencoded.workspace = true
 syntax_tree.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }

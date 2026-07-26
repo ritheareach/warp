@@ -356,7 +356,7 @@ fn task_harness(task: &AmbientAgentTask) -> AIAgentHarness {
         Harness::Claude => AIAgentHarness::ClaudeCode,
         Harness::Gemini => AIAgentHarness::Gemini,
         Harness::Codex => AIAgentHarness::Codex,
-        Harness::OpenCode | Harness::Unknown => AIAgentHarness::Unknown,
+        Harness::OpenCode | Harness::Agy | Harness::Unknown => AIAgentHarness::Unknown,
     }
 }
 

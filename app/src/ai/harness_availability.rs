@@ -346,13 +346,19 @@ impl HarnessAvailabilityModel {
 
         let ai_client = ServerApiProvider::as_ref(ctx).get_ai_client();
         ctx.spawn(
-            async move { ai_client.get_available_harnesses().await },
+            async move {
+                let server_harnesses = ai_client.get_available_harnesses().await?;
+                // Fetch local CLI models in parallel with the server response.
+                let agy_models = fetch_agy_models().await;
+                anyhow::Ok((server_harnesses, agy_models))
+            },
             |me, result, ctx| match result {
-                Ok(new_harnesses) => {
+                Ok((mut new_harnesses, agy_models)) => {
+                    // Inject locally-available harnesses with their model lists.
+                    inject_local_harnesses(&mut new_harnesses, agy_models);
                     if new_harnesses != me.harnesses {
                         me.harnesses = new_harnesses;
                         me.cache(ctx);
-                        // Invalidate cached auth secrets so the next menu open refetches.
                         let stale: Vec<Harness> = me.auth_secrets.keys().copied().collect();
                         for harness in stale {
                             me.invalidate_auth_secrets(harness);
@@ -408,7 +414,134 @@ fn harness_to_graphql_harness(harness: Harness) -> Option<warp_graphql::ai::Agen
         Harness::Claude => Some(warp_graphql::ai::AgentHarness::ClaudeCode),
         Harness::Gemini => Some(warp_graphql::ai::AgentHarness::Gemini),
         Harness::Codex => Some(warp_graphql::ai::AgentHarness::Codex),
-        Harness::OpenCode | Harness::Unknown => None,
+        Harness::OpenCode | Harness::Agy | Harness::Unknown => None,
+    }
+}
+
+/// Fetch the list of available models from the `agy models` CLI command.
+/// Returns an empty vec if `agy` is not installed or the command fails.
+async fn fetch_agy_models() -> Vec<HarnessModelInfo> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use tokio::process::Command;
+        use tokio::time::timeout;
+
+        let result = timeout(
+            std::time::Duration::from_secs(10),
+            Command::new("agy").arg("models").output(),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(output)) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                stdout
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|line| {
+                        let id = line.trim().to_string();
+                        // Make a human-readable display name from the model id.
+                        // e.g. "claude-sonnet-4-6" -> "Claude Sonnet 4.6"
+                        let display_name = make_display_name(&id);
+                        HarnessModelInfo {
+                            id,
+                            display_name,
+                            reasoning_level: None,
+                        }
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        Vec::new()
+    }
+}
+
+/// Convert a model id like "claude-sonnet-4-6" into "Claude Sonnet 4.6".
+fn make_display_name(id: &str) -> String {
+    id.split('-')
+        .map(|part| {
+            // Capitalize first letter if alphabetic, leave numbers as-is.
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(c) if c.is_alphabetic() => {
+                    c.to_uppercase().collect::<String>() + chars.as_str()
+                }
+                _ => part.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Known model lists for CLI harnesses that don't support model discovery.
+fn codex_known_models() -> Vec<HarnessModelInfo> {
+    [
+        ("o3", "o3"),
+        ("o4-mini", "o4-mini"),
+        ("codex-mini-latest", "Codex Mini"),
+        ("gpt-4o", "GPT-4o"),
+    ]
+    .iter()
+    .map(|(id, name)| HarnessModelInfo {
+        id: id.to_string(),
+        display_name: name.to_string(),
+        reasoning_level: None,
+    })
+    .collect()
+}
+
+fn claude_known_models() -> Vec<HarnessModelInfo> {
+    [
+        ("claude-opus-4-5", "Claude Opus 4.5"),
+        ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+        ("claude-haiku-4-5", "Claude Haiku 4.5"),
+        ("claude-opus-4", "Claude Opus 4"),
+        ("claude-sonnet-4", "Claude Sonnet 4"),
+        ("claude-haiku-4", "Claude Haiku 4"),
+        ("fable", "Claude Fable (latest)"),
+        ("opus", "Claude Opus (latest)"),
+        ("sonnet", "Claude Sonnet (latest)"),
+    ]
+    .iter()
+    .map(|(id, name)| HarnessModelInfo {
+        id: id.to_string(),
+        display_name: name.to_string(),
+        reasoning_level: None,
+    })
+    .collect()
+}
+
+/// Inject locally-available harnesses (Agy, Codex, Claude) into the server-provided list.
+/// Harnesses already in the list get their models updated; new ones are appended.
+fn inject_local_harnesses(
+    harnesses: &mut Vec<HarnessAvailability>,
+    agy_models: Vec<HarnessModelInfo>,
+) {
+    let local_entries: [(Harness, &str, Vec<HarnessModelInfo>); 3] = [
+        (Harness::Agy, "Agy", agy_models),
+        (Harness::Codex, "Codex (ChatGPT)", codex_known_models()),
+        (Harness::Claude, "Claude Code", claude_known_models()),
+    ];
+
+    for (harness, display_name, models) in local_entries {
+        if let Some(existing) = harnesses.iter_mut().find(|h| h.harness == harness) {
+            // Already in the list from the server — update models if we have better info.
+            if existing.available_models.is_empty() && !models.is_empty() {
+                existing.available_models = models;
+            }
+        } else {
+            // Not in the server list — add it as a locally-available harness.
+            harnesses.push(HarnessAvailability {
+                harness,
+                display_name: display_name.to_string(),
+                enabled: true,
+                available_models: models,
+            });
+        }
     }
 }
 

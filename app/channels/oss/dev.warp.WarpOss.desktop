@@ -4,20 +4,20 @@ Version=1.0
 
 Type=Application
 
-Name=WarpOss
+Name=Aster
 GenericName=TerminalEmulator
 
-Exec=warp-terminal-oss %U
-StartupWMClass=dev.warp.WarpOss
+Exec=aster %U
+StartupWMClass=dev.aster.Aster
 
 Keywords=shell;prompt;command;commandline;cmd;
 
-Icon=dev.warp.WarpOss
+Icon=dev.aster.Aster
 
 Categories=System;TerminalEmulator;
 
 # Don't run this application within a terminal.
 Terminal=false
 
-# Register ourselves as the handler for warposs:// URLs.
-MimeType=x-scheme-handler/warposs;
+# Register ourselves as the handler for aster:// URLs.
+MimeType=x-scheme-handler/aster;

@@ -1991,6 +1991,13 @@ impl AIConversation {
                 is_hidden: should_hide,
                 response_stream_id: Some(stream_id.clone()),
             });
+            log::warn!(
+                "ChatGPT debug: AppendedExchange emitted exchange_id={:?} conversation_id={:?} terminal_surface_id={:?} stream_id={:?}",
+                new_exchange_id,
+                self.id,
+                terminal_surface_id,
+                stream_id
+            );
         }
         Ok(())
     }
@@ -2124,8 +2131,11 @@ impl AIConversation {
             });
         }
 
-        self.server_conversation_token =
-            Some(ServerConversationToken::new(init_event.conversation_id));
+        // Direct/local providers do not have a Warp server conversation ID. Treat
+        // an empty StreamInit ID as "no server token" instead of persisting
+        // Some("") and sending that invalid token on the next request.
+        self.server_conversation_token = (!init_event.conversation_id.is_empty())
+            .then(|| ServerConversationToken::new(init_event.conversation_id));
         let run_id = Some(init_event.run_id).filter(|s| !s.is_empty());
         self.task_id = run_id.as_deref().and_then(|id| id.parse().ok());
         Ok(())
@@ -2791,7 +2801,13 @@ impl AIConversation {
                         for AddedExchange { task_id, .. } in self
                             .added_exchanges_by_response
                             .get_mut(response_stream_id)
-                            .ok_or(UpdateConversationError::NoPendingRequest)?
+                            .ok_or_else(|| {
+                                log::warn!(
+                                    "CreateTask root: NoPendingRequest for stream {:?}",
+                                    response_stream_id
+                                );
+                                UpdateConversationError::NoPendingRequest
+                            })?
                             .iter_mut()
                         {
                             if *task_id == root_task_id {
@@ -3162,12 +3178,34 @@ impl AIConversation {
                 let exchange_id = self
                     .added_exchanges_by_response
                     .get(response_stream_id)
-                    .ok_or(UpdateConversationError::NoPendingRequest)?
+                    .ok_or_else(|| {
+                        log::warn!(
+                            "AppendToMessageContent: NoPendingRequest for stream {:?}",
+                            response_stream_id
+                        );
+                        UpdateConversationError::NoPendingRequest
+                    })?
                     .iter()
                     .find_map(|new_exchange| {
                         (new_exchange.task_id == task_id).then_some(new_exchange.exchange_id)
                     })
-                    .ok_or(UpdateConversationError::ExchangeNotFound)?;
+                    .ok_or_else(|| {
+                        let entries = self
+                            .added_exchanges_by_response
+                            .get(response_stream_id)
+                            .map(|v| {
+                                v.iter()
+                                    .map(|e| format!("{:?}", e.task_id))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        log::warn!(
+                            "AppendToMessageContent: ExchangeNotFound — looking for task_id={:?}, have {:?}",
+                            task_id,
+                            entries
+                        );
+                        UpdateConversationError::ExchangeNotFound
+                    })?;
 
                 let current_todo_list = self.todo_lists.last().cloned();
                 let current_comment_state = self.code_review.as_ref().cloned();

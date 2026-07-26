@@ -1,6 +1,5 @@
 use warp_cli::agent::Harness;
 
-use crate::features::FeatureFlag;
 #[cfg(not(target_family = "wasm"))]
 use crate::util::path::resolve_executable;
 
@@ -11,6 +10,8 @@ pub(crate) const LOCAL_CODEX_HARNESS_INSTALLATION_REQUIRED_TOOLTIP: &str =
     "Install Codex to use this local harness.";
 pub(crate) const LOCAL_CODEX_HARNESS_DISABLED_MESSAGE: &str =
     "Local Codex child agents are temporarily disabled.";
+pub(crate) const LOCAL_AGY_HARNESS_INSTALLATION_REQUIRED_TOOLTIP: &str =
+    "Install Agy to use this local harness.";
 
 /// Client-side readiness for using a harness in local orchestration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,15 +37,19 @@ pub(crate) fn local_harness_product_disabled_message(harness: Harness) -> Option
         Harness::Codex if !local_codex_harness_is_enabled() => {
             Some(LOCAL_CODEX_HARNESS_DISABLED_MESSAGE)
         }
-        Harness::Oz | Harness::Claude | Harness::OpenCode | Harness::Gemini | Harness::Unknown => {
-            None
-        }
-        Harness::Codex => None,
+        Harness::Oz
+        | Harness::Claude
+        | Harness::OpenCode
+        | Harness::Gemini
+        | Harness::Codex
+        | Harness::Agy
+        | Harness::Unknown => None,
     }
 }
 
 fn local_codex_harness_is_enabled() -> bool {
-    FeatureFlag::LocalClaudeCodexChildHarnesses.is_enabled()
+    // Always enabled in this fork — no feature flag required.
+    true
 }
 
 /// Returns whether a local harness is exposed by product policy.
@@ -72,11 +77,15 @@ fn local_harness_setup_state_with_cli_resolver(
         Harness::Codex if !cli_is_installed("codex") => LocalHarnessSetupState::MissingHarness {
             tooltip: LOCAL_CODEX_HARNESS_INSTALLATION_REQUIRED_TOOLTIP,
         },
+        Harness::Agy if !cli_is_installed("agy") => LocalHarnessSetupState::MissingHarness {
+            tooltip: LOCAL_AGY_HARNESS_INSTALLATION_REQUIRED_TOOLTIP,
+        },
         Harness::Oz
         | Harness::Claude
         | Harness::OpenCode
         | Harness::Gemini
         | Harness::Codex
+        | Harness::Agy
         | Harness::Unknown => LocalHarnessSetupState::Ready,
     }
 }

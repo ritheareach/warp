@@ -38,11 +38,17 @@ fn make_manager_with_grok(keys: ApiKeys, grok_tokens: Option<GrokTokens>) -> Api
         grok_refresh_allowed: false,
         #[cfg(not(target_family = "wasm"))]
         grok_refresh_waiters: None,
+        chatgpt_tokens: None,
+        #[cfg(not(target_family = "wasm"))]
+        chatgpt_refresh_allowed: false,
+        #[cfg(not(target_family = "wasm"))]
+        chatgpt_refresh_in_flight: false,
         aws_credentials_state: AwsCredentialsState::Missing,
         aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy::default(),
         geap_credentials_state: GeapCredentialsState::Missing,
         secure_storage_write_version: 0,
         grok_secure_storage_write_version: 0,
+        chatgpt_secure_storage_write_version: 0,
     }
 }
 
@@ -126,6 +132,8 @@ fn endpoint_with_keys(
         url: url.into(),
         api_key: api_key.into(),
         schema: CustomEndpointSchema::default(),
+        endpoint_kind: EndpointKind::default(),
+        provider_type: String::new(),
         models: models
             .iter()
             .map(|(n, a, cfg)| CustomEndpointModel {

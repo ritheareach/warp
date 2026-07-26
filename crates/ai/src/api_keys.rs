@@ -22,6 +22,9 @@ const SECURE_STORAGE_KEY: &str = "AiApiKeys";
 /// a refresh lifecycle, not a user-pasted static key.
 const GROK_SECURE_STORAGE_KEY: &str = "GrokOAuthTokens";
 
+/// Secure-storage key for the connected ChatGPT subscription's OAuth tokens.
+const CHATGPT_SECURE_STORAGE_KEY: &str = "ChatGptOAuthTokens";
+
 /// Emitted when user-provided API keys are updated in-memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiKeyManagerEvent {
@@ -50,6 +53,287 @@ pub struct CustomEndpoint {
     pub api_key: String,
     pub models: Vec<CustomEndpointModel>,
     pub schema: CustomEndpointSchema,
+    /// Whether this is a local server, cloud API, or proxy aggregator.
+    pub endpoint_kind: EndpointKind,
+    /// Auto-detected provider type from the URL (e.g. "ollama", "anthropic", "groq").
+    #[serde(default)]
+    pub provider_type: String,
+}
+
+/// Whether an endpoint is a local server, cloud API, or proxy aggregator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointKind {
+    /// Auto-detect from URL (default).
+    #[default]
+    Auto,
+    /// Local inference server (Ollama, llama.cpp, LM Studio, vLLM).
+    Local,
+    /// Cloud API provider (OpenAI, Anthropic, Google, Groq, etc.).
+    Api,
+    /// Proxy or aggregator (OpenRouter, LiteLLM, etc.).
+    Proxy,
+}
+
+impl EndpointKind {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Local => "Local",
+            Self::Api => "API",
+            Self::Proxy => "Proxy",
+        }
+    }
+
+    pub fn from_display_name(name: &str) -> Option<Self> {
+        match name {
+            "Auto" => Some(Self::Auto),
+            "Local" => Some(Self::Local),
+            "API" => Some(Self::Api),
+            "Proxy" => Some(Self::Proxy),
+            _ => None,
+        }
+    }
+
+    /// All variants for display in a dropdown.
+    pub fn all() -> &'static [Self] {
+        &[Self::Auto, Self::Local, Self::Api, Self::Proxy]
+    }
+}
+
+/// Detect the provider type from a base URL, mirroring Odysseus's `_detect_provider`.
+///
+/// Matches on hostname rather than substring so look-alike domains are not
+/// misclassified. Unknown hosts fall back to `"openai"` (the generic
+/// OpenAI-compatible default used by most local and third-party servers).
+pub fn detect_provider(url: &str) -> &'static str {
+    let host = extract_host(url);
+    if is_ollama_native_url(url) {
+        return "ollama";
+    }
+    if host_matches(&host, "anthropic.com") {
+        return "anthropic";
+    }
+    // OpenCode: path-based detection (opencode.ai/zen/go vs opencode.ai/zen)
+    if host_matches(&host, "opencode.ai") {
+        let path = extract_path(url);
+        if path.starts_with("/zen/go") {
+            return "opencode-go";
+        }
+        return "opencode-zen";
+    }
+    if host_matches(&host, "openrouter.ai") {
+        return "openrouter";
+    }
+    if host_matches(&host, "groq.com") {
+        return "groq";
+    }
+    if host_matches(&host, "nvidia.com") {
+        return "nvidia";
+    }
+    if host_matches(&host, "moonshot.ai") || host_matches(&host, "moonshot.cn") {
+        return "moonshot";
+    }
+    if host_matches(&host, "cerebras.ai") {
+        return "cerebras";
+    }
+    if host_matches(&host, "mistral.ai") {
+        return "mistral";
+    }
+    if host_matches(&host, "googleapis.com")
+        || host_matches(&host, "generativelanguage.googleapis.com")
+    {
+        return "google";
+    }
+    if host_matches(&host, "together.xyz") || host_matches(&host, "together.ai") {
+        return "together";
+    }
+    if host_matches(&host, "fireworks.ai") {
+        return "fireworks";
+    }
+    if host_matches(&host, "deepseek.com") {
+        return "deepseek";
+    }
+    if host_matches(&host, "x.ai") {
+        return "xai";
+    }
+    if host_matches(&host, "z.ai") {
+        return "zai";
+    }
+    if host_matches(&host, "openai.com") {
+        return "openai";
+    }
+    // Default: treat as generic OpenAI-compatible (covers LM Studio, vLLM,
+    // llama.cpp, text-generation-webui, and any unknown third-party server).
+    "openai"
+}
+
+/// Infer the best [`EndpointKind`] for a URL when the user leaves it as `Auto`.
+pub fn classify_endpoint_kind(url: &str) -> EndpointKind {
+    let host = extract_host(url);
+    // Loopback / private addresses → local.
+    if is_local_host(&host) {
+        return EndpointKind::Local;
+    }
+    // Known aggregator proxies.
+    if host_matches(&host, "openrouter.ai") {
+        return EndpointKind::Proxy;
+    }
+    // Everything else with a public hostname is a cloud API.
+    if !host.is_empty() {
+        return EndpointKind::Api;
+    }
+    EndpointKind::Auto
+}
+
+/// Infer the best [`CustomEndpointSchema`] from the detected provider.
+pub fn schema_for_provider(provider: &str) -> CustomEndpointSchema {
+    match provider {
+        "anthropic" => CustomEndpointSchema::AnthropicMessages,
+        _ => CustomEndpointSchema::OpenaiChatCompletions,
+    }
+}
+
+fn extract_host(url: &str) -> String {
+    // Minimal URL host extraction without pulling in a full URL crate dependency.
+    let stripped = url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = stripped
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("");
+    host.to_lowercase()
+}
+
+fn extract_path(url: &str) -> String {
+    let stripped = url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    // Skip the host:port part, return everything after it as the path.
+    let after_host = stripped.splitn(2, '/').nth(1).unwrap_or("");
+    format!("/{after_host}").to_lowercase()
+}
+
+fn host_matches(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+fn is_local_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1")
+        || host.starts_with("192.168.")
+        || host.starts_with("10.")
+        || host.starts_with("172.")
+}
+
+fn is_ollama_native_url(url: &str) -> bool {
+    let host = extract_host(url);
+    // Ollama Cloud.
+    if host_matches(&host, "ollama.com") {
+        return true;
+    }
+    // Local Ollama: loopback host with default port 11434 OR native /api path.
+    if !is_local_host(&host) {
+        return false;
+    }
+    let path = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .splitn(2, '/')
+        .nth(1)
+        .unwrap_or("");
+    // If the path starts with /v1, it's using the OpenAI-compatible surface.
+    if path.starts_with("v1") {
+        return false;
+    }
+    // Native Ollama port or /api path.
+    url.contains(":11434") || path.starts_with("api")
+}
+
+/// Fetch the list of available model IDs from a `/v1/models` endpoint.
+///
+/// Works with any OpenAI-compatible server (Ollama /v1, LM Studio, vLLM,
+/// Groq, Together, etc.) and with Ollama's native `/api/tags` endpoint.
+/// Returns an empty `Vec` on any error (network, auth, parse).
+#[cfg(not(target_family = "wasm"))]
+pub async fn fetch_models_from_endpoint(base_url: &str, api_key: &str) -> Vec<String> {
+    use std::time::Duration;
+
+    let url = models_url_for_endpoint(base_url);
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut req = client.get(&url);
+    if !api_key.trim().is_empty() {
+        req = req.bearer_auth(api_key.trim());
+    }
+
+    let response = match req.send().await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+
+    let body: serde_json::Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    // OpenAI format: { "data": [{"id": "model-name"}, ...] }
+    if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+        let mut models: Vec<String> = data
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
+            .map(|s| s.to_string())
+            .collect();
+        models.sort();
+        return models;
+    }
+
+    // Ollama native format: { "models": [{"name": "model:tag"}, ...] }
+    if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
+        let mut ids: Vec<String> = models
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+            .map(|s| s.to_string())
+            .collect();
+        ids.sort();
+        return ids;
+    }
+
+    Vec::new()
+}
+
+/// Returns the models-list URL for a given base URL.
+fn models_url_for_endpoint(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+
+    // Ollama native API uses /api/tags; its /v1 OpenAI-compat surface uses /v1/models.
+    if is_ollama_native_url(base_url) && !base.ends_with("/v1") {
+        return format!("{base}/api/tags");
+    }
+
+    // If the base URL already ends with /v1, append /models directly.
+    if base.ends_with("/v1") {
+        return format!("{base}/models");
+    }
+
+    // For Anthropic, Google etc. that don't have a standard /v1/models,
+    // still try /v1/models (harmless to try; callers ignore errors).
+    format!("{base}/v1/models")
 }
 
 /// The request/response protocol used by a custom inference endpoint.
@@ -211,6 +495,46 @@ pub enum GrokRefreshOutcome {
     Failed,
 }
 
+/// OAuth tokens for a connected ChatGPT Plus/Pro/Team subscription.
+///
+/// Persisted under [`CHATGPT_SECURE_STORAGE_KEY`], separate from the BYO
+/// [`ApiKeys`] blob.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChatGptTokens {
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Absolute time at which `access_token` expires, if known.
+    #[serde(default)]
+    pub expires_at: Option<SystemTime>,
+    /// When the user originally connected the subscription.
+    #[serde(default)]
+    pub connected_at: Option<SystemTime>,
+}
+
+impl ChatGptTokens {
+    /// Returns the access token whenever it is non-empty, regardless of expiry.
+    pub fn access_token_for_request(&self) -> Option<&str> {
+        (!self.access_token.trim().is_empty()).then_some(self.access_token.as_str())
+    }
+
+    /// Returns `true` when the token is known to be at or past its hard expiry.
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at {
+            Some(expires_at) => expires_at <= SystemTime::now(),
+            None => false,
+        }
+    }
+}
+
+/// Outcome of a ChatGPT OAuth token refresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatGptRefreshOutcome {
+    Refreshed,
+    #[allow(dead_code)]
+    Failed,
+}
+
 /// Controls how AWS credentials are refreshed by [`ApiKeyManager`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AwsCredentialsRefreshStrategy {
@@ -230,29 +554,24 @@ pub enum AwsCredentialsRefreshStrategy {
 /// A structure that manages API keys for AI providers.
 pub struct ApiKeyManager {
     keys: ApiKeys,
-    /// OAuth tokens for a connected xAI/Grok subscription, if any. Persisted
-    /// separately from `keys` under [`GROK_SECURE_STORAGE_KEY`];
-    /// `crate::grok_subscription` keeps these fresh.
+    /// OAuth tokens for a connected xAI/Grok subscription, if any.
     grok_tokens: Option<GrokTokens>,
-    /// Whether background refresh of `grok_tokens` is currently allowed.
-    /// Mirrors the BYO API key policy, which lives in the app layer; wired in
-    /// via `ApiKeyManager::set_grok_refresh_allowed` (`crate::grok_subscription`).
     #[cfg(not(target_family = "wasm"))]
     pub(crate) grok_refresh_allowed: bool,
-    /// Coordinates Grok token refreshes so only one runs at a time (shared by
-    /// the proactive refresh timer and the request-time blocking refresh in
-    /// `crate::grok_subscription`). `Some` means a refresh is in flight; the
-    /// vector holds the completion senders for any requests waiting on it (it
-    /// may be empty for a proactive refresh with no waiters). `None` means no
-    /// refresh is running. Always cleared when the refresh finishes.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) grok_refresh_waiters: Option<Vec<oneshot::Sender<GrokRefreshOutcome>>>,
+    /// OAuth tokens for a connected ChatGPT Plus/Pro/Team subscription, if any.
+    chatgpt_tokens: Option<ChatGptTokens>,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) chatgpt_refresh_allowed: bool,
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) chatgpt_refresh_in_flight: bool,
     pub(crate) aws_credentials_state: AwsCredentialsState,
     aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy,
-    /// In-memory Gemini Enterprise (GEAP) credential state.
     pub(crate) geap_credentials_state: GeapCredentialsState,
     secure_storage_write_version: u64,
     grok_secure_storage_write_version: u64,
+    chatgpt_secure_storage_write_version: u64,
 }
 
 pub struct CustomEndpointParams {
@@ -261,12 +580,15 @@ pub struct CustomEndpointParams {
     pub api_key: String,
     pub models: Vec<(String, Option<String>, Option<String>)>,
     pub schema: CustomEndpointSchema,
+    pub endpoint_kind: EndpointKind,
+    pub provider_type: String,
 }
 
 impl ApiKeyManager {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
         let keys = Self::load_keys_from_secure_storage(ctx);
         let grok_tokens = Self::load_grok_tokens_from_secure_storage(ctx);
+        let chatgpt_tokens = Self::load_chatgpt_tokens_from_secure_storage(ctx);
         Self {
             keys,
             grok_tokens,
@@ -274,11 +596,17 @@ impl ApiKeyManager {
             grok_refresh_allowed: false,
             #[cfg(not(target_family = "wasm"))]
             grok_refresh_waiters: None,
+            chatgpt_tokens,
+            #[cfg(not(target_family = "wasm"))]
+            chatgpt_refresh_allowed: false,
+            #[cfg(not(target_family = "wasm"))]
+            chatgpt_refresh_in_flight: false,
             aws_credentials_state: AwsCredentialsState::Missing,
             aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy::default(),
             geap_credentials_state: GeapCredentialsState::Missing,
             secure_storage_write_version: 0,
             grok_secure_storage_write_version: 0,
+            chatgpt_secure_storage_write_version: 0,
         }
     }
 
@@ -301,10 +629,39 @@ impl ApiKeyManager {
             .is_some()
     }
 
+    /// The currently stored ChatGPT OAuth tokens, if the user has connected a
+    /// ChatGPT Plus/Pro/Team subscription.
+    pub fn chatgpt_tokens(&self) -> Option<&ChatGptTokens> {
+        self.chatgpt_tokens.as_ref()
+    }
+
+    /// Returns `true` when a ChatGPT subscription is connected with a usable
+    /// OAuth access token.
+    pub fn has_chatgpt_subscription(&self) -> bool {
+        self.chatgpt_tokens
+            .as_ref()
+            .and_then(ChatGptTokens::access_token_for_request)
+            .is_some()
+    }
+
+    /// Stores (or clears) the ChatGPT OAuth tokens and persists them.
+    pub fn set_chatgpt_tokens(
+        &mut self,
+        tokens: Option<ChatGptTokens>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.chatgpt_tokens == tokens {
+            return;
+        }
+        self.chatgpt_tokens = tokens;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        self.write_chatgpt_tokens_to_secure_storage(ctx);
+    }
+
     /// Returns `true` when the user has any usable BYO credential: a pasted
     /// provider or custom-endpoint key, or a connected Grok subscription.
     pub fn has_any_key(&self) -> bool {
-        self.keys.has_any_key() || self.has_grok_subscription()
+        self.keys.has_any_key() || self.has_grok_subscription() || self.has_chatgpt_subscription()
     }
 
     /// Stores (or clears, with `None`) the xAI/Grok OAuth tokens and persists
@@ -354,12 +711,16 @@ impl ApiKeyManager {
             api_key,
             models,
             schema,
+            endpoint_kind,
+            provider_type,
         } = params;
         self.keys.custom_endpoints.push(CustomEndpoint {
             name,
             url,
             api_key,
             schema,
+            endpoint_kind,
+            provider_type,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -390,12 +751,16 @@ impl ApiKeyManager {
             api_key,
             models,
             schema,
+            endpoint_kind,
+            provider_type,
         } = params;
         self.keys.custom_endpoints[index] = CustomEndpoint {
             name,
             url,
             api_key,
             schema,
+            endpoint_kind,
+            provider_type,
             models: models
                 .into_iter()
                 .map(|(name, alias, config_key)| CustomEndpointModel {
@@ -482,7 +847,10 @@ impl ApiKeyManager {
         &self,
         include_custom_models: bool,
     ) -> Option<api::request::settings::CustomModelProviders> {
-        if !include_custom_models {
+        let has_chatgpt_subscription = self.keys.custom_endpoints.iter().any(|endpoint| {
+            crate::chatgpt_subscription::oauth::is_chatgpt_subscription_base(&endpoint.url)
+        });
+        if !include_custom_models && !has_chatgpt_subscription {
             return None;
         }
 
@@ -490,11 +858,36 @@ impl ApiKeyManager {
             .keys
             .custom_endpoints
             .iter()
+            // ChatGPT subscription is a first-party OAuth integration and does
+            // not depend on the workspace BYO/custom-inference entitlement.
+            .filter(|endpoint| {
+                include_custom_models
+                    || crate::chatgpt_subscription::oauth::is_chatgpt_subscription_base(
+                        &endpoint.url,
+                    )
+            })
             .filter(|endpoint| !endpoint.url.trim().is_empty() && !endpoint.api_key.is_empty())
-            .map(
-                |endpoint| api::request::settings::custom_model_providers::CustomModelProvider {
+            // Only send HTTPS endpoints to the server — HTTP localhost endpoints
+            // are called directly by the client (server rejects plain HTTP URLs).
+            .filter(|endpoint| {
+                let url = endpoint.url.trim();
+                url.starts_with("https://") || !url.starts_with("http://")
+            })
+            .map(|endpoint| {
+                let api_key = if crate::chatgpt_subscription::oauth::is_chatgpt_subscription_base(
+                    &endpoint.url,
+                ) {
+                    self.chatgpt_tokens
+                        .as_ref()
+                        .and_then(ChatGptTokens::access_token_for_request)
+                        .unwrap_or(&endpoint.api_key)
+                        .to_owned()
+                } else {
+                    endpoint.api_key.clone()
+                };
+                api::request::settings::custom_model_providers::CustomModelProvider {
                     base_url: endpoint.url.clone(),
-                    api_key: endpoint.api_key.clone(),
+                    api_key,
                     schema: endpoint.schema.to_proto() as i32,
                     models: endpoint
                         .models
@@ -507,8 +900,8 @@ impl ApiKeyManager {
                             },
                         )
                         .collect(),
-                },
-            )
+                }
+            })
             .filter(|provider| !provider.models.is_empty())
             .collect();
 
@@ -517,6 +910,30 @@ impl ApiKeyManager {
         } else {
             Some(api::request::settings::CustomModelProviders { providers })
         }
+    }
+
+    /// Returns whether a model config key belongs to the ChatGPT subscription
+    /// endpoint. This is used by the client to keep local provider task state
+    /// separate from Warp-server conversations.
+    pub fn is_chatgpt_subscription_model(&self, model: &str) -> bool {
+        self.keys.custom_endpoints.iter().any(|endpoint| {
+            crate::chatgpt_subscription::oauth::is_chatgpt_subscription_base(&endpoint.url)
+                && endpoint.models.iter().any(|m| m.config_key == model)
+        })
+    }
+
+    /// Returns whether a model is handled by the client-side direct-provider
+    /// bridge rather than Warp's cloud agent server.
+    pub fn is_direct_custom_model(&self, model: &str) -> bool {
+        self.keys.custom_endpoints.iter().any(|endpoint| {
+            let url = endpoint.url.trim();
+            let direct = url.starts_with("http://127.")
+                || url.starts_with("http://localhost")
+                || url.starts_with("http://0.0.0.0")
+                || url.starts_with("https://chatgpt.com/backend-api/codex")
+                || url.starts_with("https://opencode.ai/zen/");
+            direct && endpoint.models.iter().any(|m| m.config_key == model)
+        })
     }
 
     pub fn api_keys_for_request(
@@ -727,6 +1144,66 @@ impl ApiKeyManager {
                 report_error!(
                     anyhow::Error::new(e)
                         .context("Failed to persist Grok tokens to secure storage")
+                );
+            }
+        });
+    }
+
+    fn load_chatgpt_tokens_from_secure_storage(
+        ctx: &mut ModelContext<Self>,
+    ) -> Option<ChatGptTokens> {
+        let json = match ctx.secure_storage().read_value(CHATGPT_SECURE_STORAGE_KEY) {
+            Ok(json) => json,
+            Err(e) => {
+                if !matches!(e, secure_storage::Error::NotFound) {
+                    report_error!(
+                        anyhow::Error::new(e)
+                            .context("Failed to read ChatGPT tokens from secure storage")
+                    );
+                }
+                return None;
+            }
+        };
+        match serde_json::from_str(&json) {
+            Ok(tokens) => Some(tokens),
+            Err(e) => {
+                report_error!(
+                    anyhow::Error::new(e).context("Failed to deserialize ChatGPT tokens")
+                );
+                None
+            }
+        }
+    }
+
+    fn write_chatgpt_tokens_to_secure_storage(&mut self, ctx: &mut ModelContext<Self>) {
+        let payload = match self.chatgpt_tokens.as_ref().map(serde_json::to_string) {
+            Some(Ok(json)) => Some(json),
+            Some(Err(e)) => {
+                report_error!(anyhow::Error::new(e).context("Failed to serialize ChatGPT tokens"));
+                return;
+            }
+            None => None,
+        };
+        self.chatgpt_secure_storage_write_version += 1;
+        let write_version = self.chatgpt_secure_storage_write_version;
+        ctx.spawn(async move { payload }, move |me, payload, ctx| {
+            if write_version != me.chatgpt_secure_storage_write_version {
+                return;
+            }
+            let result = match payload {
+                Some(ref json) => ctx
+                    .secure_storage()
+                    .write_value(CHATGPT_SECURE_STORAGE_KEY, json),
+                None => ctx
+                    .secure_storage()
+                    .remove_value(CHATGPT_SECURE_STORAGE_KEY),
+            };
+            if let Err(e) = result
+                && !matches!(e, secure_storage::Error::NotFound)
+            {
+                report_error!(
+                    anyhow::Error::new(e)
+                        .context("Failed to persist ChatGPT tokens to secure storage")
                 );
             }
         });

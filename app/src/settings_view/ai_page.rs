@@ -783,6 +783,8 @@ pub struct AISettingsPageView {
     grok_oauth_attempt: Option<ManualCodeExchange>,
     #[cfg(not(target_family = "wasm"))]
     grok_code_editor: ViewHandle<EditorView>,
+    /// Whether a ChatGPT subscription device-auth flow is in progress.
+    chatgpt_connecting: bool,
 }
 
 impl AISettingsPageView {
@@ -2069,6 +2071,7 @@ impl AISettingsPageView {
             grok_oauth_attempt: None,
             #[cfg(not(target_family = "wasm"))]
             grok_code_editor,
+            chatgpt_connecting: false,
         }
     }
 
@@ -2456,6 +2459,8 @@ impl AISettingsPageView {
                 url,
                 api_key,
                 schema,
+                endpoint_kind,
+                provider_type,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
@@ -2470,6 +2475,8 @@ impl AISettingsPageView {
                             api_key: api_key.clone(),
                             models: models.clone(),
                             schema: *schema,
+                            endpoint_kind: *endpoint_kind,
+                            provider_type: provider_type.clone(),
                         },
                         ctx,
                     );
@@ -2499,6 +2506,8 @@ impl AISettingsPageView {
                 url,
                 api_key,
                 schema,
+                endpoint_kind,
+                provider_type,
                 models,
             } => {
                 if !Self::can_use_custom_inference_controls(ctx) {
@@ -2514,6 +2523,8 @@ impl AISettingsPageView {
                             api_key: api_key.clone(),
                             models: models.clone(),
                             schema: *schema,
+                            endpoint_kind: *endpoint_kind,
+                            provider_type: provider_type.clone(),
                         },
                         ctx,
                     );
@@ -2838,6 +2849,179 @@ impl AISettingsPageView {
                 ctx.notify();
             },
         );
+    }
+
+    /// Kicks off the ChatGPT subscription device-auth flow: requests a device
+    /// code, shows the user code + URL, and polls until the user authorizes.
+    #[cfg(not(target_family = "wasm"))]
+    fn start_chatgpt_oauth(&mut self, ctx: &mut ViewContext<Self>) {
+        use ::ai::chatgpt_subscription::oauth;
+
+        use crate::ToastStack;
+        use crate::view_components::DismissibleToast;
+
+        const CONNECT_TOAST_OBJECT_ID: &str = "chatgpt_oauth_connect_toast";
+
+        self.chatgpt_connecting = true;
+        ctx.notify();
+
+        // Step 1: request device code.
+        ctx.spawn(
+            async move { oauth::request_device_code().await },
+            move |_me, result, ctx| {
+                let device_code = match result {
+                    Ok(d) => d,
+                    Err(err) => {
+                        _me.chatgpt_connecting = false;
+                        let window_id = ctx.window_id();
+                        ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                            ts.add_ephemeral_toast(
+                                DismissibleToast::error(format!(
+                                    "Couldn't start ChatGPT login: {err}"
+                                )),
+                                window_id,
+                                ctx,
+                            );
+                        });
+                        return;
+                    }
+                };
+
+                // Step 2: open the verification URL and show the user code.
+                let verification_url = device_code.verification_url().to_string();
+                ctx.open_url(&verification_url);
+
+                let user_code = device_code.user_code.clone();
+                let window_id = ctx.window_id();
+                ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                    ts.add_persistent_toast(
+                        DismissibleToast::default(format!(
+                            "Opening your browser to connect ChatGPT. Enter code: {user_code}"
+                        ))
+                        .with_object_id(CONNECT_TOAST_OBJECT_ID.to_string()),
+                        window_id,
+                        ctx,
+                    );
+                });
+
+                // Step 3: poll until authorized or timeout.
+                let poll_interval = device_code.poll_interval();
+                let device_auth_id = device_code.device_auth_id.clone();
+                let user_code_poll = device_code.user_code.clone();
+
+                ctx.spawn(
+                    async move {
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_secs(900);
+                        loop {
+                            warpui_core::r#async::Timer::after(poll_interval).await;
+                            if std::time::Instant::now() >= deadline {
+                                return Err(anyhow::anyhow!(
+                                    "ChatGPT authorization timed out. Please try again."
+                                ));
+                            }
+                            match oauth::poll_device_auth(&device_auth_id, &user_code_poll).await {
+                                oauth::PollOutcome::Authorized(code_resp) => {
+                                    // Exchange authorization_code + verifier for tokens.
+                                    return oauth::exchange_code_for_tokens(
+                                        &code_resp.authorization_code,
+                                        &code_resp.code_verifier,
+                                    )
+                                    .await;
+                                }
+                                oauth::PollOutcome::Pending => continue,
+                                oauth::PollOutcome::Error(e) => return Err(e),
+                            }
+                        }
+                    },
+                    |_me, result, ctx| {
+                        _me.chatgpt_connecting = false;
+                        let toast = match result {
+                            Ok(tokens) => {
+                                let access_token = tokens.access_token.clone();
+                                ApiKeyManager::handle(ctx).update(ctx, move |manager, ctx| {
+                                    manager.store_chatgpt_tokens(tokens, ctx);
+                                });
+                                // Fetch models with the native OAuth token and register the
+                                // ChatGPT Codex endpoint. The token is injected dynamically by
+                                // ApiKeyManager, so background refreshes keep the endpoint valid.
+                                ctx.spawn(
+                                    async move {
+                                        let models = oauth::fetch_available_models(&access_token).await;
+                                        if models.is_empty() {
+                                            anyhow::bail!("ChatGPT login succeeded, but no Codex models were returned");
+                                        }
+                                        Ok::<_, anyhow::Error>(models)
+                                    },
+                                    |_me, result, ctx| {
+                                        if let Ok(models) = result {
+                                            use ::ai::api_keys::{
+                                                CustomEndpointParams, EndpointKind,
+                                            };
+                                            let model_count = models.len();
+                                            let endpoint_url = oauth::CHATGPT_BACKEND_BASE.to_string();
+                                            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                                                let existing_idx = manager
+                                                    .keys()
+                                                    .custom_endpoints
+                                                    .iter()
+                                                    .position(|ep| ep.url == endpoint_url);
+                                                let model_entries = models
+                                                    .into_iter()
+                                                    .map(|m| (m, None, None))
+                                                    .collect();
+                                                let params = CustomEndpointParams {
+                                                    name: "ChatGPT Subscription".to_string(),
+                                                    url: endpoint_url.clone(),
+                                                    api_key: "chatgpt-oauth".to_string(),
+                                                    models: model_entries,
+                                                    schema: ::ai::api_keys::CustomEndpointSchema::OpenaiChatCompletions,
+                                                    endpoint_kind: EndpointKind::Api,
+                                                    provider_type: "chatgpt-subscription".to_string(),
+                                                };
+                                                if let Some(idx) = existing_idx {
+                                                    manager.save_custom_endpoint(idx, params, ctx);
+                                                } else {
+                                                    manager.add_custom_endpoint(params, ctx);
+                                                }
+                                            });
+                                            let window_id = ctx.window_id();
+                                            crate::ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                                                ts.add_ephemeral_toast(
+                                                    DismissibleToast::success(format!(
+                                                        "ChatGPT ready — {model_count} models added to Custom endpoints"
+                                                    )),
+                                                    window_id,
+                                                    ctx,
+                                                );
+                                            });
+                                        }
+                                    },
+                                );
+                                DismissibleToast::success(
+                                    "ChatGPT subscription connected — fetching models…".to_string(),
+                                )
+                            }
+                            Err(err) => {
+                                DismissibleToast::error(format!(
+                                    "ChatGPT connection failed: {err}"
+                                ))
+                            }
+                        };
+                        let window_id_inner = ctx.window_id();
+                        ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                            ts.add_ephemeral_toast(
+                                toast.with_object_id(CONNECT_TOAST_OBJECT_ID.to_string()),
+                                window_id_inner,
+                                ctx,
+                            );
+                        });
+                        ctx.notify();
+                    },
+                );
+            },
+        );
+        ctx.notify();
     }
 
     /// Set the active subpage and rebuild the widget list to show only relevant widgets.
@@ -3747,6 +3931,9 @@ pub enum AISettingsPageAction {
     OpenEditCustomEndpointModal(usize),
     ConnectGrokSubscription,
     DisconnectGrokSubscription,
+    ConnectChatGptSubscription,
+    DisconnectChatGptSubscription,
+    FetchChatGptModels,
 
     #[cfg(feature = "local_fs")]
     SetConversationLayout(crate::util::file::external_editor::settings::OpenConversationPreference),
@@ -4652,6 +4839,109 @@ impl TypedActionView for AISettingsPageView {
                     toast_stack.add_ephemeral_toast(toast, window_id, ctx);
                 });
                 ctx.notify();
+            }
+            AISettingsPageAction::ConnectChatGptSubscription => {
+                #[cfg(not(target_family = "wasm"))]
+                self.start_chatgpt_oauth(ctx);
+            }
+            AISettingsPageAction::DisconnectChatGptSubscription => {
+                ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                    manager.set_chatgpt_tokens(None, ctx);
+                });
+                let window_id = ctx.window_id();
+                crate::ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
+                    let toast = crate::view_components::DismissibleToast::default(
+                        "ChatGPT subscription disconnected".to_string(),
+                    );
+                    toast_stack.add_ephemeral_toast(toast, window_id, ctx);
+                });
+                ctx.notify();
+            }
+            AISettingsPageAction::FetchChatGptModels => {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let window_id = ctx.window_id();
+                    crate::ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                        ts.add_ephemeral_toast(
+                            crate::view_components::DismissibleToast::default(
+                                "Fetching ChatGPT models…".to_string(),
+                            ),
+                            window_id,
+                            ctx,
+                        );
+                    });
+
+                    let access_token = ApiKeyManager::as_ref(ctx)
+                        .chatgpt_tokens()
+                        .and_then(::ai::api_keys::ChatGptTokens::access_token_for_request)
+                        .map(str::to_owned);
+                    ctx.spawn(
+                        async move {
+                            let token = access_token
+                                .ok_or_else(|| anyhow::anyhow!("ChatGPT subscription is not connected"))?;
+                            let models = ::ai::chatgpt_subscription::oauth::fetch_available_models(&token).await;
+                            if models.is_empty() {
+                                anyhow::bail!("No usable ChatGPT Codex models were returned");
+                            }
+                            Ok::<_, anyhow::Error>(models)
+                        },
+                        |_me, result, ctx| {
+                            match result {
+                                Ok(models) => {
+                                    use ::ai::api_keys::{CustomEndpointParams, EndpointKind};
+                                    let model_count = models.len();
+                                    let endpoint_url = ::ai::chatgpt_subscription::oauth::CHATGPT_BACKEND_BASE.to_string();
+                                    ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                                        let existing_idx = manager
+                                            .keys()
+                                            .custom_endpoints
+                                            .iter()
+                                            .position(|ep| ep.url == endpoint_url);
+                                        let model_entries =
+                                            models.into_iter().map(|m| (m, None, None)).collect();
+                                        let params = CustomEndpointParams {
+                                            name: "ChatGPT Subscription".to_string(),
+                                            url: endpoint_url,
+                                            api_key: "chatgpt-oauth".to_string(),
+                                            models: model_entries,
+                                            schema: ::ai::api_keys::CustomEndpointSchema::OpenaiChatCompletions,
+                                            endpoint_kind: EndpointKind::Api,
+                                            provider_type: "chatgpt-subscription".to_string(),
+                                        };
+                                        if let Some(idx) = existing_idx {
+                                            manager.save_custom_endpoint(idx, params, ctx);
+                                        } else {
+                                            manager.add_custom_endpoint(params, ctx);
+                                        }
+                                    });
+                                    let window_id = ctx.window_id();
+                                    crate::ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                                        ts.add_ephemeral_toast(
+                                            crate::view_components::DismissibleToast::success(
+                                                format!("{model_count} ChatGPT models added to Custom endpoints"),
+                                            ),
+                                            window_id,
+                                            ctx,
+                                        );
+                                    });
+                                    ctx.notify();
+                                }
+                                Err(err) => {
+                                    let window_id = ctx.window_id();
+                                    crate::ToastStack::handle(ctx).update(ctx, |ts, ctx| {
+                                        ts.add_ephemeral_toast(
+                                            crate::view_components::DismissibleToast::error(
+                                                format!("Failed to fetch ChatGPT models: {err}"),
+                                            ),
+                                            window_id,
+                                            ctx,
+                                        );
+                                    });
+                                }
+                            }
+                        },
+                    );
+                }
             }
         }
     }
@@ -8246,12 +8536,15 @@ struct ApiKeysWidget {
     openai_api_key_editor: ViewHandle<EditorView>,
     anthropic_api_key_editor: ViewHandle<EditorView>,
     google_api_key_editor: ViewHandle<EditorView>,
-    /// Buttons for the SuperGrok (xAI) subscription row; which one renders
-    /// depends on whether OAuth tokens are stored or a connect attempt is in
-    /// progress.
+    /// Buttons for the SuperGrok (xAI) subscription row.
     grok_connect_button: ViewHandle<ActionButton>,
     grok_connecting_button: ViewHandle<ActionButton>,
     grok_disconnect_button: ViewHandle<ActionButton>,
+    /// Buttons for the ChatGPT subscription row.
+    chatgpt_connect_button: ViewHandle<ActionButton>,
+    chatgpt_connecting_button: ViewHandle<ActionButton>,
+    chatgpt_disconnect_button: ViewHandle<ActionButton>,
+    chatgpt_fetch_models_button: ViewHandle<ActionButton>,
 
     can_use_warp_credits_for_fallback: SwitchStateHandle,
     upgrade_highlight_index: HighlightedHyperlink,
@@ -8479,6 +8772,44 @@ impl ApiKeysWidget {
             }
         });
 
+        // ChatGPT subscription buttons.
+        let chatgpt_connect_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Connect", SecondaryTheme)
+                .with_size(ButtonSize::Small)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AISettingsPageAction::ConnectChatGptSubscription);
+                })
+        });
+        let chatgpt_connecting_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Connecting...", SecondaryTheme).with_size(ButtonSize::Small)
+        });
+        chatgpt_connecting_button.update(ctx, |button, ctx| {
+            button.set_disabled(true, ctx);
+        });
+        let chatgpt_disconnect_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Disconnect", DangerSecondaryTheme)
+                .with_size(ButtonSize::Small)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AISettingsPageAction::DisconnectChatGptSubscription);
+                })
+        });
+        for button in [&chatgpt_connect_button, &chatgpt_disconnect_button] {
+            button.update(ctx, |button, ctx| {
+                button.set_disabled(
+                    !(is_any_ai_enabled && is_byo_enabled && member_byo_keys_allowed),
+                    ctx,
+                );
+            });
+        }
+
+        let chatgpt_fetch_models_button = ctx.add_typed_action_view(|_| {
+            ActionButton::new("Fetch models", SecondaryTheme)
+                .with_size(ButtonSize::Small)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AISettingsPageAction::FetchChatGptModels);
+                })
+        });
+
         Self {
             openai_api_key_editor,
             anthropic_api_key_editor,
@@ -8487,6 +8818,11 @@ impl ApiKeysWidget {
             grok_connect_button,
             grok_connecting_button,
             grok_disconnect_button,
+
+            chatgpt_connect_button,
+            chatgpt_connecting_button,
+            chatgpt_disconnect_button,
+            chatgpt_fetch_models_button,
 
             can_use_warp_credits_for_fallback: Default::default(),
             upgrade_highlight_index: Default::default(),
@@ -8993,6 +9329,106 @@ impl ApiKeysWidget {
         column.finish()
     }
 
+    /// The "Connect ChatGPT Plus/Pro subscription" row.
+    fn render_chatgpt_subscription_row(
+        &self,
+        appearance: &Appearance,
+        is_enabled: bool,
+        is_connecting: bool,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let chatgpt_tokens = ApiKeyManager::as_ref(app).chatgpt_tokens();
+        let text_color = styles::header_font_color(is_enabled, app);
+
+        let label = Flex::row()
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(4.)
+            .with_child(
+                Text::new_inline(
+                    "Use your ChatGPT Plus, Pro, or Team subscription",
+                    appearance.ui_font_family(),
+                    CONTENT_FONT_SIZE,
+                )
+                .with_color(text_color.into())
+                .finish(),
+            )
+            .finish();
+
+        let button = if chatgpt_tokens.is_some() {
+            &self.chatgpt_disconnect_button
+        } else if is_connecting {
+            &self.chatgpt_connecting_button
+        } else {
+            &self.chatgpt_connect_button
+        };
+
+        let header_row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(Shrinkable::new(1., label).finish())
+            .with_child(button.as_ref(app).render(app))
+            .finish();
+
+        let description = Container::new(
+            Text::new(
+                "Connect your ChatGPT subscription to use GPT models through the ChatGPT Codex backend. No API key needed — uses your ChatGPT account credits.",
+                appearance.ui_font_family(),
+                CONTENT_FONT_SIZE,
+            )
+            .with_color(styles::description_font_color(is_enabled, app).into())
+            .soft_wrap(true)
+            .finish(),
+        )
+        .with_margin_right(styles::TOGGLE_WIDTH_MARGIN)
+        .finish();
+
+        let mut column = Flex::column()
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(header_row)
+            .with_child(description);
+
+        if let Some(tokens) = chatgpt_tokens {
+            let connected_text = match tokens.connected_at.map(DateTime::<Local>::from) {
+                Some(connected_at) => format!(
+                    "Connected on {}.",
+                    connected_at.format("%m/%d/%Y at %-I:%M%P")
+                ),
+                None => "Connected.".to_string(),
+            };
+            let check = ConstrainedBox::new(
+                Icon::Check
+                    .to_warpui_icon(appearance.theme().ansi_fg_green().into())
+                    .finish(),
+            )
+            .with_width(12.)
+            .with_height(12.)
+            .finish();
+            let status_text = Text::new_inline(
+                connected_text,
+                appearance.ui_font_family(),
+                CONTENT_FONT_SIZE,
+            )
+            .with_color(styles::description_font_color(is_enabled, app).into())
+            .finish();
+            column.add_child(
+                Flex::row()
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(4.)
+                    .with_child(check)
+                    .with_child(status_text)
+                    .with_child(
+                        Container::new(self.chatgpt_fetch_models_button.as_ref(app).render(app))
+                            .with_margin_left(8.)
+                            .finish(),
+                    )
+                    .finish(),
+            );
+        }
+
+        column.finish()
+    }
+
     /// Paste-the-code fallback for the current SuperGrok connect attempt.
     #[cfg(not(target_family = "wasm"))]
     fn render_grok_manual_code_entry(
@@ -9291,6 +9727,18 @@ impl SettingsWidget for ApiKeysWidget {
                         .finish(),
                 );
             }
+
+            // ChatGPT subscription row.
+            column.add_child(
+                Container::new(self.render_chatgpt_subscription_row(
+                    appearance,
+                    provider_keys_enabled,
+                    view.chatgpt_connecting,
+                    app,
+                ))
+                .with_margin_top(16.)
+                .finish(),
+            );
         }
 
         // Warp credit fallback applies to member-provided API keys, not custom endpoints.

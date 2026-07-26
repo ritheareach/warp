@@ -2385,7 +2385,17 @@ impl BlocklistAIController {
                 ));
             };
 
-            let active_tasks = conversation.compute_active_tasks();
+            let is_direct_custom_model = ::ai::api_keys::ApiKeyManager::as_ref(ctx)
+                .is_direct_custom_model(request_input.model_id.as_str());
+            let active_tasks =
+                if conversation.server_conversation_token().is_some() || is_direct_custom_model {
+                    conversation.compute_active_tasks()
+                } else {
+                    // A direct/local provider has no Warp server conversation. Do
+                    // not leak its synthetic task IDs into the first cloud request
+                    // after switching providers.
+                    vec![]
+                };
 
             (
                 conversation.id(),

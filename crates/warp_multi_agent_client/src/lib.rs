@@ -6,6 +6,8 @@ use tracing_futures::Instrument as _;
 use warp_core::channel::ChannelState;
 use warp_server_client::base_client::{AmbientHeaderPolicy, BaseClient};
 
+pub mod direct_local;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Failed to authenticate multi-agent request")]
@@ -41,10 +43,20 @@ cfg_if::cfg_if! {
 }
 
 /// Opens a decoded multi-agent response event stream.
+///
+/// When the request targets a local HTTP endpoint (e.g. openai-oauth at
+/// 127.0.0.1), calls it directly from the client — Warp's server rejects
+/// loopback addresses so we bypass it for local providers.
 pub async fn generate_multi_agent_output(
     client: &BaseClient,
     request: &warp_multi_agent_api::Request,
 ) -> Result<OutputStream, Error> {
+    // Intercept local HTTP endpoints — call directly, bypass Warp's server.
+    if direct_local::should_use_direct_local(request) {
+        tracing::info!("Direct local endpoint detected — bypassing Warp server");
+        return direct_local::generate_local_output(request).await;
+    }
+
     let auth_token = client
         .get_or_refresh_access_token()
         .await

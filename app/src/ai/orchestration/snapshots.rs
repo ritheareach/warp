@@ -314,11 +314,20 @@ pub fn model_snapshot(state: &OrchestrationConfigState, ctx: &AppContext) -> Opt
             build_oz_model_snapshot(choices, &state.model_id)
         }
         Some(Harness::Codex) if is_local => {
-            // Local Codex: only "Default model" entry.
-            OptionSnapshot::ready(
-                vec![OptionRow::new(String::new(), DEFAULT_MODEL_LABEL)],
-                Some(String::new()),
-            )
+            // Local Codex: show known models from HarnessAvailabilityModel.
+            let models = HarnessAvailabilityModel::as_ref(ctx)
+                .models_for(Harness::Codex)
+                .map(|models| {
+                    models
+                        .iter()
+                        .map(|model| ModelChoiceInput {
+                            id: model.id.clone(),
+                            label: model.display_name.clone(),
+                            disabled_reason: None,
+                        })
+                        .collect::<Vec<_>>()
+                });
+            build_non_oz_model_snapshot(models, &state.model_id)
         }
         Some(harness) => {
             let models = HarnessAvailabilityModel::as_ref(ctx)
